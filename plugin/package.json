@@ -3,7 +3,7 @@
   "private": true,
   "description": "Runtime dependencies of Pendulum's optional adapters. Nothing else in the plugin needs an install.",
   "dependencies": {
-    "@vercel/sandbox": "3.9.1"
+    "@vercel/sandbox": "4.0.0"
   },
   "overrides": {
     "@vercel/cli-config": {
