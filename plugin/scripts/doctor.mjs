@@ -1777,9 +1777,21 @@ export async function runnerChecks({ inputs, env = process.env }) {
     const home = await agentHomeProblem();
     out.push(home ? FAIL("agent home", home, `remove that user or give it the home ${AGENT_HOME}: Pendulum wipes that path before each job`) : PASS("agent home", `${AGENT_USER} at ${AGENT_HOME}`));
   }
+  out.push(nodeCheck());
   out.push(gitCheck(await onPath("git"), await gitVersion()));
   out.push(...(await claudeSandboxChecks({ inputs, env })));
   return out;
+}
+
+/** The least Node.js Pendulum runs on: @vercel/sandbox 4 (the Vercel adapter) needs 22.19. */
+export const NODE_FLOOR = [22, 19, 0];
+
+/** The Node.js running Pendulum here (`version`, process.versions.node): FAIL below NODE_FLOOR, naming the fix. */
+export function nodeCheck(version = process.versions.node) {
+  const v = String(version).split(".").map(Number);
+  const min = NODE_FLOOR.join(".");
+  if (gitAtLeast(v, NODE_FLOOR)) return PASS("node", version);
+  return FAIL("node", `Node.js ${version} is older than ${min}, the least Pendulum runs on`, `set node_version (or PENDULUM_NODE_VERSION) to ${NODE_FLOOR.slice(0, 2).join(".")} or newer, or update the runner's or this machine's Node.js`);
 }
 
 /**

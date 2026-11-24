@@ -59,7 +59,7 @@ Pendulum needs:
 
 - **CI that runs on pull requests, with at least one required check on your default branch.** Pendulum merges on those checks; a repository with no CI needs that first.
 - **A public repository, or a private one on GitHub Pro, Team or Enterprise Cloud.** GitHub Free offers branch rules, and so required checks, on public repositories only. Pendulum uses a merge queue where GitHub offers one (repositories an organization owns: public ones, and private ones on Enterprise Cloud) and strict required checks elsewhere.
-- **Admin rights on the repository**, and, where you run setup, your coding agent's CLI, the [`gh` CLI](https://cli.github.com) logged in, and Node 22 or newer.
+- **Admin rights on the repository**, and, where you run setup, your coding agent's CLI, the [`gh` CLI](https://cli.github.com) logged in, and Node 22.19 or newer.
 - **A model credential GitHub Actions can use** ([Coding agent accounts](#coding-agent-accounts)):
   - Claude Code: an Anthropic API key, billed per use. For your own individual work, within your Claude plan's terms, your subscription works instead ([Claude on your subscription](docs/INSTALL.md#claude-on-your-subscription)).
   - Codex: an OpenAI API key or a Vercel AI Gateway key, billed per use. Your ChatGPT plan works only in [local mode](#where-it-runs).
