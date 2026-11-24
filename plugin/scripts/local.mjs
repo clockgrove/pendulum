@@ -12,8 +12,8 @@
 // serve takes only those unless --all (PENDULUM_LOCAL_ALL=1). Where no Action runs (GitHub lists no active pendulum.yml
 // workflow), serve labels each Objective it picks pendulum:local first. A claim comment with a heartbeat marks one in flight.
 // Needs git, gh, the harness CLI (claude or codex logged in; copilot with a Copilot Requests token in
-// COPILOT_GITHUB_TOKEN or ~/.config/pendulum/copilot-token, plus slirp4netns and iptables on Linux), srt
-// (npm i -g @anthropic-ai/sandbox-runtime), ripgrep and, on Linux and WSL2, bubblewrap and socat; and a
+// COPILOT_GITHUB_TOKEN or ~/.config/pendulum/copilot-token, plus slirp4netns and iptables on Linux), srt 0.0.83
+// or newer (npm i -g @anthropic-ai/sandbox-runtime@latest), ripgrep and, on Linux and WSL2, bubblewrap and socat; and a
 // fine-grained token for this one repository, in PENDULUM_LOCAL_TOKEN or ~/.config/pendulum/tokens/<owner>/<name>
 // (contents, issues and pull requests read and write; actions and variables read). That token is all the GitHub reach the
 // model gets. No App needed (one in PENDULUM_LOCAL_APP_ID posts the notices), no vendor, no API key; GitHub holds
@@ -62,7 +62,7 @@ import { bwrapShim, claudeEnvText, localTools, stageCommands } from "./lib/copil
 import { noticeMinter, serveNotices } from "./lib/app-token.mjs";
 import { appIdSetLine, appIdWhyText, learnAppId, readLocalAppId } from "./lib/app-id.mjs";
 import { answeredRepos, declaredQuestion, planNeeds as planNeedsOf } from "./lib/one-repo.mjs";
-import { localDatabaseChecks, noticeAppCheck, pluginVersionCheck } from "./doctor.mjs";
+import { localDatabaseChecks, noticeAppCheck, pluginVersionCheck, srtCheck, srtVersion } from "./doctor.mjs";
 import { RELEASES_URL, checkoutProblem, markInUse, pinDecision, releaseCheckout, runningPendulum, runningName, startProblem } from "./lib/release.mjs";
 import { SKIP_SMUDGE_ENV, lfsPinEnv } from "./lib/lfs.mjs";
 import { EDITED_REASON, authorGate, foundationTrusted, labelsVouched, objectiveInputs, planStateNow, recordText, settled, startTime, trustedIssue } from "./lib/objective-trust.mjs";
@@ -444,7 +444,11 @@ export function preflight(harness, repoFull, token, copilotToken, { outer = oute
   const problems = [];
   if (!onPath("git")) problems.push("git is not on PATH; install git (https://git-scm.com/downloads)");
   if (!onPath("gh")) problems.push("gh is not on PATH; install the GitHub CLI (https://cli.github.com)");
-  if (!onPath("srt")) problems.push("srt is not on PATH; Pendulum's own commands run in it (npm i -g @anthropic-ai/sandbox-runtime)");
+  if (!onPath("srt")) problems.push("srt is not on PATH; Pendulum's own commands run in it (npm i -g @anthropic-ai/sandbox-runtime@latest)");
+  else {
+    const srt = srtCheck(true, srtVersion());
+    if (srt.status === "FAIL") problems.push(`${srt.detail} (${srt.fix})`);
+  }
   if (!onPath("rg")) problems.push("rg (ripgrep) is not on PATH; the sandbox needs it");
   if (platform() === "linux") for (const bin of ["bwrap", "socat"]) if (!onPath(bin)) problems.push(`${bin} is not on PATH; the sandbox needs it (sudo apt-get install -y bubblewrap socat)`);
   const startProblems = platform() === "linux" && onPath("srt") && onPath("bwrap") ? sandboxStartProblems() : [];
@@ -3895,7 +3899,7 @@ export class Local {
     const script = join(r.checkout.dir, "plugin", "scripts", "local.mjs");
     if (typeof process.execve !== "function") {
       r.state = "manual";
-      log(`this Node (${process.version}) cannot start serve again in its own process (process.execve needs Node 22.15 or newer): serve goes on with ${runningName(this.pendulum)}; restart it with ${join(r.checkout.dir, "plugin", "bin", "pendulum")} serve to run clockgrove/pendulum@${r.ref}`);
+      log(`this Node (${process.version}) has no process.execve to start serve again in its own process: serve goes on with ${runningName(this.pendulum)}; restart it with ${join(r.checkout.dir, "plugin", "bin", "pendulum")} serve to run clockgrove/pendulum@${r.ref}`);
       return false;
     }
     const problem = checkoutProblem(r.checkout);

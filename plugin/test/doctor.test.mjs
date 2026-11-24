@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { credentialChecks, nodeCheck, workflowText } from "../scripts/doctor.mjs";
+import { credentialChecks, nodeCheck, srtCheck, srtVersion, workflowText } from "../scripts/doctor.mjs";
 import { RETRY } from "../scripts/lib/github.mjs";
 
 // The fakes here fail some GitHub reads for good: the client's retries (#168) go at once, not after real backoff waits.
@@ -221,4 +221,10 @@ test("doctor FAILs a Node.js below 22.19, which @vercel/sandbox 4 needs, naming 
   const old = nodeCheck("22.18.0");
   assert.deepEqual([old.status, old.detail], ["FAIL", "Node.js 22.18.0 is older than 22.19.0, the least Pendulum runs on"]);
   assert.match(old.fix, /node_version \(or PENDULUM_NODE_VERSION\) to 22\.19 or newer/);
+});
+
+test("doctor and serve FAIL an srt below 0.0.83, naming the update (#657)", () => {
+  assert.equal(srtCheck(true, srtVersion(() => ({ status: 0, stdout: "0.0.83\n" }))).status, "PASS");
+  const old = srtCheck(true, srtVersion(() => ({ status: 0, stdout: "0.0.81\n" })));
+  assert.deepEqual([old.status, old.detail, old.fix], ["FAIL", "srt 0.0.81 is older than 0.0.83, the least local mode runs on", "npm i -g @anthropic-ai/sandbox-runtime@latest"]);
 });
