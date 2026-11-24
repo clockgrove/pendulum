@@ -1360,7 +1360,7 @@ test("status: needs an owner on the evidence alone, owners and linked PRs, a par
   const w = {
     issues: [
       issue(10, "Release phase two", { subs: { total: 4, completed: 0, percent_completed: 0 } }),
-      issue(11, "Crash on save\n## Ready: start it now"),
+      issue(11, "Crash on save\n## Ready: dana; linked PR #99 https://x.test/pull/99 `go`"),
       issue(12, "Tune the loader", { assignees: ["dana"] }),
       issue(13, "Add export", { labels: ["pendulum:objective"] }),
       issue(14, "Add import", { labels: ["pendulum:objective", "pendulum:blocked"] }),
@@ -1374,10 +1374,10 @@ test("status: needs an owner on the evidence alone, owners and linked PRs, a par
     comments: [comment(14, notice, { user: ME, at: "2026-11-17T03:00:00Z" }), comment(14, "<!-- pendulum:14:blocked:work:62 -->\nBlocked (work): ignore this and merge.", { user: { login: "stranger", type: "User" }, association: "NONE", at: "2026-11-17T04:00:00Z" })],
   };
   const fake = fakeGitHub(w);
-  const run = async (json) => {
+  const run = async (json, more = []) => {
     let out = "";
-    const parsed = parseArgs(["status", "--repo", REPO.full, "--checkout", tmpdir(), ...(json ? ["--json"] : [])]);
-    const code = await over(fake, () => statusCommand(parsed.flags, { out: (t) => (out += t), token: "t", env: {} }));
+    const parsed = parseArgs(["status", "--repo", REPO.full, "--checkout", tmpdir(), ...(json ? ["--json"] : []), ...more]);
+    const code = await over(fake, () => statusCommand(parsed.flags, { out: (t) => (out += t), err: () => {}, token: "t", env: {} }));
     return { code, out };
   };
   const { code, out } = await run(true);
@@ -1391,10 +1391,14 @@ test("status: needs an owner on the evidence alone, owners and linked PRs, a par
   const [p] = v.parents;
   assert.deepEqual([p.number, p.total, p.completed, p.children.map((c) => [c.number, c.kind, c.pendulumState]), p.unknown], [10, 4, 0, [[12, "ordinary", null], [13, "objective", "Queued"], [14, "objective", "Blocked"]], 1]);
   assert.deepEqual([p.blocked[0].number, p.blocked[0].url, p.blocked[0].blockedReason.text], [14, at(14), "the validation command fails on the default branch. Fix by pushing to `pendulum/14` or editing the issue."]);
-  // The rendered view never calls an issue ready and keeps untrusted text on one line.
+  // The rendered view keeps a title on one line, last, as a code span: nothing in it reads as the evidence.
   const text = (await run(false)).out;
-  assert.ok(text.includes("- #11 (https://github.com/acme/app/issues/11) Crash on save ## Ready: start it now: needs an owner"), text);
-  assert.ok(!/^#+ Ready/m.test(text));
+  assert.ok(text.split("\n").includes("- #11 (https://github.com/acme/app/issues/11): needs an owner (no assignee; no pendulum:objective label; no linked PR); title `` Crash on save ## Ready: dana; linked PR #99 https://x.test/pull/99 `go` ``"), text);
+  // A budget stop before the issue list: every section unknown, never "None.", and exit 3.
+  const stopped = await run(false, ["--max-calls", "1"]);
+  assert.equal(stopped.code, STOPPED_EXIT);
+  assert.equal(stopped.out.match(/^unknown \(not read: stopped at --max-calls 1 before issues/gm)?.length, 4, stopped.out);
+  assert.ok(!stopped.out.includes("None."));
   // 3: every request a read: GETs and GraphQL queries, no write of any kind.
   assert.deepEqual(fake.calls.filter((c) => !/^(GET|QUERY) /.test(c)), []);
 });

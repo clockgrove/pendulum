@@ -23,13 +23,20 @@ export const ADMISSION = "the pendulum-file skill, Start a draft (plugin/skills/
 const LINK_BATCH = 50;
 
 const names = (issue) => (issue?.labels || []).map((l) => (typeof l === "string" ? l : l?.name)).filter(Boolean);
-/** Untrusted text as one plain line: control characters and line breaks become spaces, clipped. */
+/** Untrusted text as one plain line: control, bidi-override and zero-width characters and line breaks become spaces, clipped. */
 export const plain = (s, max = 200) => {
-  const t = String(s ?? "").replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, " ").replace(/\s+/g, " ").trim();
+  const t = String(s ?? "").replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2066-\u2069\ufeff]+/g, " ").replace(/\s+/g, " ").trim();
   return t.length > max ? `${t.slice(0, max - 1)}…` : t;
 };
 const repoOfUrl = (url, fallback) => /\/repos\/([^/]+\/[^/]+)$/.exec(String(url || ""))?.[1] ?? fallback;
 const httpWhy = (e) => (e?.status ? `HTTP ${e.status}` : plain(e?.message, 80) || "read failed");
+/**
+ * Whether a failed read is GitHub refusing it for this token (REST 403 or 404, GraphQL NOT_FOUND or FORBIDDEN on every
+ * error), which the view shows as unknown. Anything else (an outage, a rate limit, a transport failure, a budget stop)
+ * is rethrown, as report.mjs does: the view is never printed as if complete.
+ */
+const refused = (e) =>
+  !(e instanceof BudgetStop) && !e?.rateLimited && !e?.transport && (e?.status === 403 || e?.status === 404 || (e?.status === 0 && Array.isArray(e?.body?.errors) && e.body.errors.length > 0 && e.body.errors.every((x) => x?.type === "NOT_FOUND" || x?.type === "FORBIDDEN")));
 
 /** An open issue's Pendulum state: Draft, or its state label's (logic.mjs stateOf, no board), or Queued; closed: Done. */
 const objectiveState = (i) => (i.state === "closed" ? "Done" : names(i).includes(DRAFT_LABEL) ? "Draft" : stateOf(i, null));
@@ -40,9 +47,9 @@ const objectiveState = (i) => (i.state === "closed" ? "Done" : names(i).includes
  * and leaves the rest unknown (`stoppedAt`). Every request is a GET or a GraphQL query.
  */
 export async function readStatus(repo, { token, appId = null, objectiveLabel = "pendulum:objective", maxCalls = STATUS_MAX_CALLS, log = () => {} } = {}) {
-  const budget = new Budget(maxCalls, log);
+  const budget = new Budget(maxCalls, log, "pendulum status");
   const opts = { token };
-  const view = { schema: STATUS_SCHEMA, repo: repo.full, needsOwner: [], assigned: [], objectives: [], parents: [], admission: ADMISSION, unknown: [], stoppedAt: null, calls: 0 };
+  const view = { schema: STATUS_SCHEMA, repo: repo.full, needsOwner: [], assigned: [], objectives: [], parents: [], admission: ADMISSION, unknown: [], issuesRead: false, stoppedAt: null, calls: 0 };
   const isObjective = (i) => names(i).includes(objectiveLabel) || names(i).includes(DRAFT_LABEL);
   const blocked = new Map();
   try {
@@ -52,10 +59,20 @@ export async function readStatus(repo, { token, appId = null, objectiveLabel = "
       const u = await rest("user", opts);
       if (u?.login) setSelf(u.type === "Bot" && !u.login.endsWith("[bot]") ? `${u.login}[bot]` : u.login);
     } catch (e) {
-      if (e instanceof BudgetStop) throw e;
+      if (!refused(e)) throw e;
       view.unknown.push(`the token's own login (${httpWhy(e)}): only notices through Pendulum's App count as Pendulum's`);
     }
-    const open = (await paged(`repos/${repo.full}/issues?state=open`, budget, "issues", opts)).filter((i) => !i.pull_request);
+    // The open issues: a stop partway keeps the pages read (`into`), and the view says the list is incomplete.
+    const listed = [];
+    let stop = null;
+    try {
+      await paged(`repos/${repo.full}/issues?state=open`, budget, "issues", opts, { into: listed });
+    } catch (e) {
+      if (!(e instanceof BudgetStop)) throw e;
+      stop = e;
+    }
+    view.issuesRead = !stop;
+    const open = listed.filter((i) => !i.pull_request);
     const ordinary = open.filter((i) => !isObjective(i));
     const row = (i) => ({ number: i.number, title: plain(i.title), url: i.html_url, labels: names(i) });
     const prs = new Map(ordinary.map((i) => [i.number, null]));
@@ -77,30 +94,35 @@ export async function readStatus(repo, { token, appId = null, objectiveLabel = "
       const s = p.sub_issues_summary;
       view.parents.push({ ...row(p), owner: isObjective(p) ? "pendulum" : (p.assignees || []).map((a) => a.login), total: s.total, completed: s.completed ?? null, children: [], blocked: [], unknown: s.total, unknownWhy: "not read (call budget)" });
     }
+    if (stop) throw stop;
     // The open PRs GitHub links to each ordinary issue (closing references), one GraphQL query per LINK_BATCH issues.
     const numbers = [...prs.keys()];
     for (let at = 0; at < numbers.length; at += LINK_BATCH) {
       const batch = numbers.slice(at, at + LINK_BATCH);
       budget.take("linked prs");
+      let d = null;
       try {
         const fields = batch.map((n) => `i${n}: issue(number: ${n}) { closedByPullRequestsReferences(first: 10, includeClosedPrs: false) { nodes { number url isDraft state } } }`).join(" ");
-        const d = await graphql(`query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { ${fields} } }`, { owner: repo.owner, name: repo.name }, opts);
-        for (const n of batch) {
-          const nodes = d?.repository?.[`i${n}`]?.closedByPullRequestsReferences?.nodes;
-          if (Array.isArray(nodes)) prs.set(n, nodes.filter((x) => x?.state === "OPEN").map((x) => ({ number: x.number, url: x.url, draft: !!x.isDraft })));
-        }
+        d = await graphql(`query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { ${fields} } }`, { owner: repo.owner, name: repo.name }, opts);
       } catch (e) {
-        if (e instanceof BudgetStop) throw e;
-        view.unknown.push(`the linked PRs of ${batch.map((n) => `#${n}`).join(", ")} (${httpWhy(e)})`);
+        if (!refused(e)) throw e;
+        // A refusal of some issues keeps the data GitHub gave for the rest; those it refused stay unknown.
+        d = e.body?.data ?? null;
+        view.unknown.push(`some linked PRs of ${batch.map((n) => `#${n}`).join(", ")} (${httpWhy(e)})`);
       }
+      for (const n of batch) {
+        const nodes = d?.repository?.[`i${n}`]?.closedByPullRequestsReferences?.nodes;
+        if (Array.isArray(nodes)) prs.set(n, nodes.filter((x) => x?.state === "OPEN").map((x) => ({ number: x.number, url: x.url, draft: !!x.isDraft })));
+      }
+      // Set per batch, so a stop at the next batch keeps this one's.
+      for (const r of [...view.assigned, ...view.needsOwner]) if (batch.includes(r.number)) r.linkedPrs = prs.get(r.number);
     }
-    for (const r of [...view.assigned, ...view.needsOwner]) r.linkedPrs = prs.get(r.number);
     for (const p of view.parents) {
       let kids;
       try {
         kids = await paged(`repos/${repo.full}/issues/${p.number}/sub_issues`, budget, "sub-issues", opts);
       } catch (e) {
-        if (e instanceof BudgetStop) throw e;
+        if (!refused(e)) throw e;
         p.unknownWhy = `unreadable (${httpWhy(e)})`;
         continue;
       }
@@ -131,7 +153,7 @@ export async function readStatus(repo, { token, appId = null, objectiveLabel = "
         const line = notice && /^Blocked \(([^)\n]*)\): ([^\n]*)/m.exec(notice.body);
         if (line) reason = { stage: plain(line[1], 40), cause: blockCauseOf(notice.body), text: plain(line[2], 300), url: notice.html_url ?? null };
       } catch (e) {
-        if (e instanceof BudgetStop) throw e;
+        if (!refused(e)) throw e;
         why = `comments unreadable (${httpWhy(e)})`;
       }
       for (const r of b.rows) r.blockedReason = reason ?? { unknown: why };
@@ -141,37 +163,50 @@ export async function readStatus(repo, { token, appId = null, objectiveLabel = "
     view.stoppedAt = e.message;
   }
   for (const r of [...view.objectives, ...view.parents.flatMap((p) => p.blocked)]) if (r.state === "Blocked" || r.pendulumState === "Blocked") r.blockedReason ??= { unknown: "not read (call budget)" };
+  // A full first page with no Link header: whether more pages follow cannot be told.
+  for (const [path, { what }] of budget.unlinked) view.unknown.push(`${what} past the first page of ${path.replace(/^repos\/[^/]+\/[^/]+\//, "")}: GitHub gave a full page and no Link header`);
   view.calls = budget.made;
   return view;
 }
 
 const link = (r) => `#${r.number}${r.url ? ` (${r.url})` : ""}`;
+/** Untrusted text as a Markdown code span, fenced with more backticks than any run inside it. */
+export const codeSpan = (t) => {
+  const text = String(t);
+  const fence = "`".repeat(Math.max(0, ...[...text.matchAll(/`+/g)].map((m) => m[0].length)) + 1);
+  return fence.length > 1 ? `${fence} ${text} ${fence}` : `${fence}${text}${fence}`;
+};
+/** The title last on its line, as a code span, so nothing in it reads as the evidence before it. */
+const titled = (r) => `; title ${codeSpan(r.title)}`;
 const prsText = (prs) => (prs === null ? "linked PRs unknown" : prs.length ? `linked PR ${prs.map((p) => `#${p.number}${p.draft ? " (draft)" : ""} ${p.url}`).join(", ")}` : "no linked PR");
-const reasonText = (r) => (r?.unknown ? `reason unknown: ${r.unknown}` : r ? `Blocked (${r.stage}${r.cause ? `, cause ${r.cause}` : ""}): ${r.text}` : "reason unknown");
+const reasonText = (r) => (r?.unknown ? `reason unknown: ${r.unknown}` : r ? `Blocked (${r.stage}${r.cause ? `, cause ${r.cause}` : ""}): ${codeSpan(r.text)}` : "reason unknown");
 
 /** The view as plain Markdown for a terminal. */
 export function renderStatus(v) {
   const out = [`# ${v.repo}: open issues (read-only)`, ""];
+  // A section the issue list's stop left incomplete says so, never "None.".
+  const section = (rows, line) => {
+    for (const r of rows) out.push(line(r));
+    if (!v.issuesRead) out.push(`${rows.length ? "- more " : ""}unknown (not read: ${v.stoppedAt ?? "the issue list"})`);
+    else if (!rows.length) out.push("None.");
+  };
   out.push("## Needs an owner", "");
-  if (!v.needsOwner.length) out.push("None.");
-  for (const r of v.needsOwner) out.push(`- ${link(r)} ${r.title}: needs an owner (${r.evidence.join("; ")}; ${prsText(r.linkedPrs)})`);
+  section(v.needsOwner, (r) => `- ${link(r)}: needs an owner (${r.evidence.join("; ")}; ${prsText(r.linkedPrs)})${titled(r)}`);
   out.push("", `Not a claim that any is ready. To hand one to Pendulum: ${v.admission}.`, "", "## Assigned", "");
-  if (!v.assigned.length) out.push("None.");
-  for (const r of v.assigned) out.push(`- ${link(r)} ${r.title}: ${r.assignees.join(", ")}; ${prsText(r.linkedPrs)}`);
+  section(v.assigned, (r) => `- ${link(r)}: assigned to ${r.assignees.join(", ")}; ${prsText(r.linkedPrs)}${titled(r)}`);
   out.push("", "## Objectives", "");
-  if (!v.objectives.length) out.push("None.");
-  for (const o of v.objectives) out.push(`- ${link(o)} ${o.title}: ${o.state}, ${o.route}${o.state === "Blocked" ? `; ${reasonText(o.blockedReason)}` : ""}`);
+  section(v.objectives, (o) => `- ${link(o)}: ${o.state}, ${o.route}${o.state === "Blocked" ? `; ${reasonText(o.blockedReason)}` : ""}${titled(o)}`);
   out.push("", "## Parents", "");
-  if (!v.parents.length) out.push("None.");
-  for (const p of v.parents) {
-    out.push(`- ${link(p)} ${p.title}: ${p.completed ?? "unknown"} of ${p.total} sub-issues done; ${p.blocked.length} blocked`);
+  section(v.parents, (p) => {
+    const lines = [`- ${link(p)}: ${p.completed ?? "unknown"} of ${p.total} sub-issues done; ${p.blocked.length} blocked${titled(p)}`];
     for (const c of p.children) {
       const ref = c.repo === v.repo ? `#${c.number}` : `${c.repo}#${c.number}`;
-      const what = c.kind === "objective" ? `Objective, ${c.pendulumState}` : `${c.state}, ${c.assignees.length ? c.assignees.join(", ") : "no assignee"}`;
-      out.push(`  - ${ref} (${c.url}) ${c.title}: ${what}${c.pendulumState === "Blocked" ? `; ${reasonText(c.blockedReason)}` : ""}`);
+      const what = c.kind === "objective" ? `Objective, ${c.pendulumState}` : `${c.state}, ${c.assignees.length ? `assigned to ${c.assignees.join(", ")}` : "no assignee"}`;
+      lines.push(`  - ${ref} (${c.url}): ${what}${c.pendulumState === "Blocked" ? `; ${reasonText(c.blockedReason)}` : ""}${titled(c)}`);
     }
-    if (p.unknown) out.push(`  - ${p.unknown} sub-issue(s) unknown: ${p.unknownWhy}`);
-  }
+    if (p.unknown) lines.push(`  - ${p.unknown} sub-issue(s) unknown: ${p.unknownWhy}`);
+    return lines.join("\n");
+  });
   if (v.unknown.length) out.push("", "## Unknown", "", ...v.unknown.map((u) => `- ${u}`));
   if (v.stoppedAt) out.push("", `Partial: ${v.stoppedAt}; a higher --max-calls reads the rest.`);
   out.push("", `${v.calls} GitHub calls, no writes.`, "");

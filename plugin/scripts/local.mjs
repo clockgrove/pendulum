@@ -4841,7 +4841,7 @@ export async function reportCommand(flags, { out = (t) => process.stdout.write(t
  * with --json, else Markdown, on stdout; Pendulum's log lines on stderr. Returns 0, or STOPPED_EXIT when the call budget
  * stopped the reads (the view printed is partial).
  */
-export async function statusCommand(flags, { out = (t) => process.stdout.write(t), token = null, env = process.env } = {}) {
+export async function statusCommand(flags, { out = (t) => process.stdout.write(t), err = (t) => process.stderr.write(t), token = null, env = process.env } = {}) {
   const here = resolve(flags.checkout || process.cwd());
   let checkout = null;
   try {
@@ -4854,7 +4854,7 @@ export async function statusCommand(flags, { out = (t) => process.stdout.write(t
   const { objectiveLabel } = resolveInputs({ args: { repo: repoFull }, env });
   const envAppId = /^\d+$/.test(String(env.PENDULUM_LOCAL_APP_ID ?? "").trim()) ? Number(env.PENDULUM_LOCAL_APP_ID) : null;
   const appId = flags.app ?? envAppId ?? readLocalAppId(repoFull).id ?? null;
-  const view = await readStatus(repoOf(repoFull), { token: token ?? sessionToken(repoFull), appId, objectiveLabel, maxCalls: flags["max-calls"] ?? STATUS_MAX_CALLS });
+  const view = await readStatus(repoOf(repoFull), { token: token ?? sessionToken(repoFull), appId, objectiveLabel, maxCalls: flags["max-calls"] ?? STATUS_MAX_CALLS, log: (line) => err(`${line}\n`) });
   out(flags.json ? `${JSON.stringify(view, null, 2)}\n` : renderStatus(view));
   return view.stoppedAt === null ? 0 : STOPPED_EXIT;
 }
