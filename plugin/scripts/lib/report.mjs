@@ -233,7 +233,7 @@ class NothingToRead extends Error {}
  * once from a Link header's last page (GitHub's `rel="last"`), else one at a time, said as "at least"; with `stop`, one
  * at a time, so no page is planned that an early stop leaves unread. Returns `into`.
  */
-async function paged(path, budget, what, opts, { stop = null, into = [], planned = 1 } = {}) {
+export async function paged(path, budget, what, opts, { stop = null, into = [], planned = 1 } = {}) {
   for (let page = 1; ; page += 1) {
     budget.take(what);
     let link = null;

@@ -200,14 +200,14 @@
       }
     },
     "pendulum-status": {
-      "sha256": "394333b54d1b472dca28682f9cf8a0acd8154bf97f3a6048d45ac76957f974d9",
-      "lines": 40,
-      "words": 630,
+      "sha256": "64daff1efcc6b44783172c899e0a00f9667e522a6b8cd0a3e9b38264d4dc7047",
+      "lines": 44,
+      "words": 698,
       "files": {
         "reference.md": {
-          "sha256": "b0da1fe6f1bb255963fe1373d6a2ba81155003433879f7e60969eb407cf35ea2",
-          "lines": 55,
-          "words": 967
+          "sha256": "b3ee4df12750ac20f4bec1f0a3af1d6a96edf24791bffe2aa5de18fc68f8b5c7",
+          "lines": 70,
+          "words": 1246
         }
       }
     },
