@@ -1757,7 +1757,8 @@ export async function setupFilesCheck({ inputs, checkout, list = protectedPaths(
 
 // ------------------------------------------------------------------ runner
 
-export async function runnerChecks({ inputs, env = process.env }) {
+/** Where the job or loop runs: harness CLI, timeout, gh, node, git, the sandbox; with `srt` (local mode's doctor), srt's floor. */
+export async function runnerChecks({ inputs, env = process.env, srt = false }) {
   const out = [];
   const bin = await onPath(CLI[inputs.harness]?.bin || "");
   out.push(bin ? PASS("harness cli", bin) : FAIL("harness cli", `${CLI[inputs.harness]?.bin} not installed`, `the action installs ${CLI[inputs.harness]?.pkg}; on a laptop: npm install -g ${CLI[inputs.harness]?.pkg}`));
@@ -1779,7 +1780,7 @@ export async function runnerChecks({ inputs, env = process.env }) {
   }
   out.push(nodeCheck());
   out.push(gitCheck(await onPath("git"), await gitVersion()));
-  if (backend(env).name === "local") out.push(srtCheck(!!(await onPath("srt")), srtVersion()));
+  if (srt) out.push(srtCheck(!!(await onPath("srt")), srtVersion()));
   out.push(...(await claudeSandboxChecks({ inputs, env })));
   return out;
 }
@@ -2571,7 +2572,7 @@ async function main() {
   results.push(...(await objectiveHostChecks({ inputs, repo, token })));
   results.push(...(await sandboxStorageChecks({ inputs, repo, token })));
   results.push(...(await repositoryChecks({ inputs, checkout, runSetup: !!args["run-setup"], local, wf })));
-  results.push(...(await runnerChecks({ inputs })));
+  results.push(...(await runnerChecks({ inputs, srt: local })));
   const fails = results.filter((r) => r.status === "FAIL").length;
   if (args.json) process.stdout.write(`${JSON.stringify({ ready: fails === 0, failures: fails, checks: results }, null, 2)}\n`);
   else {
