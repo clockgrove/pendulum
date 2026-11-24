@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { credentialChecks, workflowText } from "../scripts/doctor.mjs";
+import { credentialChecks, nodeCheck, workflowText } from "../scripts/doctor.mjs";
 import { RETRY } from "../scripts/lib/github.mjs";
 
 // The fakes here fail some GitHub reads for good: the client's retries (#168) go at once, not after real backoff waits.
@@ -214,4 +214,11 @@ test("doctor's workflow triggers row: a workflow on pull_request (not its first 
   assert.match(unguarded, /pendulum:review/);
   const row = await guardRow(unguarded);
   assert.deepEqual([row.status, row.detail], ["WARN", "pull_request trigger without the pendulum:review label guard"]);
+});
+
+test("doctor FAILs a Node.js below 22.19, which @vercel/sandbox 4 needs, naming node_version (#654)", () => {
+  assert.equal(nodeCheck("22.19.0").status, "PASS");
+  const old = nodeCheck("22.18.0");
+  assert.deepEqual([old.status, old.detail], ["FAIL", "Node.js 22.18.0 is older than 22.19.0, the least Pendulum runs on"]);
+  assert.match(old.fix, /node_version \(or PENDULUM_NODE_VERSION\) to 22\.19 or newer/);
 });

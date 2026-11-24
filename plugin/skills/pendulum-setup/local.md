@@ -10,7 +10,7 @@ Local mode runs Pendulum's worker and reviewer on the user's machine, on its har
 
 ## The steps
 
-1. **Tools.** `git`, `gh`, Node 22 or newer, the harness CLI the user runs (logged in), and `srt`: `npm i -g @anthropic-ai/sandbox-runtime`. Add the platform's packages above.
+1. **Tools.** `git`, `gh`, Node 22.19 or newer, the harness CLI the user runs (logged in), and `srt`: `npm i -g @anthropic-ai/sandbox-runtime`. Add the platform's packages above.
    On Ubuntu 24.04 and later, AppArmor keeps the sandboxes from starting; local mode names what it finds before it runs anything. The user allows unprivileged user namespaces (`sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`, kept in `/etc/sysctl.d`), and where the `bwrap-userns-restrict` profile is loaded (Ubuntu 26.04), unloads it (`sudo apparmor_parser -R /etc/apparmor.d/bwrap-userns-restrict`, kept off with `sudo ln -s /etc/apparmor.d/bwrap-userns-restrict /etc/apparmor.d/disable/`). WSL2 has no AppArmor.
 2. **The repository token.** The user creates a fine-grained token on GitHub (Settings, Developer settings, Fine-grained tokens):
    - Repository access: this one repository only.

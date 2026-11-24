@@ -22,7 +22,7 @@ Copilot runs locally only on Linux and WSL2 hosts where its outer sandbox starts
 
 ## Set it up
 
-1. Install `git`, `gh`, Node 22 or newer, the harness CLI you use (logged in), and `srt`: `npm i -g @anthropic-ai/sandbox-runtime`.
+1. Install `git`, `gh`, Node 22.19 or newer, the harness CLI you use (logged in), and `srt`: `npm i -g @anthropic-ai/sandbox-runtime`.
    Add the platform packages above, for example `sudo apt-get install -y bubblewrap socat ripgrep`.
 
    On Ubuntu 24.04 and later, AppArmor keeps srt's and Claude Code's sandboxes from starting; local mode names what it finds before it runs anything.

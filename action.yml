@@ -147,7 +147,7 @@ inputs:
     description: Hosts the harness's sandboxed commands (Claude Code, Codex or Copilot) may reach on Actions and in a cloud sandbox, beyond GitHub and the npm and Yarn registries (comma or space separated; `*.example.com` covers its subdomains), for every Objective; one Objective's own host goes in its `pendulum:host:<host>` label. The Actions and cloud sandbox counterpart of local mode's PENDULUM_LOCAL_DOMAINS.
     required: false
   node_version:
-    description: The Node.js version set up on the runner for the harness CLI and the repository's commands (default 22; set it to what your CI uses).
+    description: The Node.js version set up on the runner for the harness CLI and the repository's commands (default 22; set it to what your CI uses, 22.19 or newer).
     required: false
   project:
     description: 'The node id of the repository''s Pendulum Project board, which setup records as it creates the board. Empty, Pendulum looks for the board linked to the repository titled exactly `Pendulum: <repository>`.'
