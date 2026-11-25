@@ -19,7 +19,7 @@ import { preparePendulumHome, realRoots, runnerLaunch } from "./lib/claude-runne
 import { CODEX_RUNNER_HOME, CONFINEMENT_PROBE, DECOY_LAUNCH, PROBE_MARKER, offListHost, resetCodexState } from "./lib/codex-runner.mjs";
 import { randomBytes } from "node:crypto";
 import { COLUMNS, collaboratorPermission, findProject, getRepo, ghLoginToken, listRulesets, repoOf, rest, organizationVariableNames, repositoryVariables } from "./lib/github.mjs";
-import { APP_ID_VARIABLE, appIdVariable, PENDULUM_VERSION, GUESS_MAX_HOURS, guessHoursMs, timeZoneName, localLimits, machineSettings, input, mask, readFlags, resolveInputs, workflowDriftLines, workflowSettings, appliedLayers, ignoredLines, layerLines, organizationVariablesLine, settingLayers } from "./lib/inputs.mjs";
+import { APP_ID_VARIABLE, appIdVariable, PENDULUM_VERSION, GUESS_MAX_HOURS, guessHoursMs, timeZoneName, localLimits, machineSettings, input, mask, readFlags, resolveInputs, workflowDriftLines, workflowSettings, appliedLayers, ignoredLines, layerLines, organizationVariablesLine, settingLayers, workflowHarness } from "./lib/inputs.mjs";
 import { machineZone } from "./lib/clock.mjs";
 import { REVIEW_LABEL, commandRefs, commandText, parseMaintainer, protectedPaths, refusalReason, selfLogin, setupGuard, unprotectedFiles } from "./lib/logic.mjs";
 import { SAFE_PATH, agentUser, exec, onPath, whichSync } from "./lib/proc.mjs";
@@ -34,7 +34,7 @@ import { parseYaml, workflowEvents, writeGrants } from "./lib/yaml.mjs";
 import { appIdSetLine, appIdWhyText, learnAppId } from "./lib/app-id.mjs";
 import { AGENT_HOME, AGENT_USER, agentHomeProblem, agentLauncher } from "./lib/agent.mjs";
 import { parseUsage, promoCodex, unpricedCodex } from "./lib/usage.mjs";
-import { CHOICE_PREFIXES, HOST_PREFIX, hostsOf } from "./lib/choice.mjs";
+import { CHOICE_PREFIXES, HOST_PREFIX, hostsOf, resolveHarnessVersion } from "./lib/choice.mjs";
 import { TRIAGE_MODEL, triageKey } from "./lib/triage.mjs";
 import { DRIFT_MODEL } from "./lib/drift.mjs";
 import { deciderKind } from "./lib/decider.mjs";
@@ -1755,6 +1755,23 @@ export async function setupFilesCheck({ inputs, checkout, list = protectedPaths(
   return out;
 }
 
+/**
+ * The harness CLI version each harness installs off local mode, and why (choice.mjs resolveHarnessVersion over
+ * harness_version and harness_min_age_days, `registry` the npm registry's documents): one row per harness. None chosen
+ * is a FAIL for the workflow's harness (`workflowHarness`), whose stages Block on it, and a WARN for the others, which
+ * Block only an Objective whose label or override picks them. Local mode runs this machine's own CLIs and installs none.
+ */
+export async function harnessVersionChecks({ inputs, workflowHarness: own = workflowHarness(), registry, now } = {}) {
+  const rows = [];
+  for (const [h, c] of Object.entries(CLI)) {
+    const r = await resolveHarnessVersion({ harness: h, pkg: c.pkg, spec: inputs.harnessVersion, workflowHarness: own, minAgeDays: inputs.harnessMinAgeDays, ...(registry ? { registry } : {}), ...(now ? { now } : {}) });
+    const name = `harness version (${h})`;
+    if (r.version) rows.push(PASS(name, `${c.pkg}@${r.version}: ${r.why}`));
+    else rows.push((h === own ? FAIL : WARN)(name, r.problem.reason, r.problem.fix));
+  }
+  return rows;
+}
+
 // ------------------------------------------------------------------ runner
 
 export async function runnerChecks({ inputs, env = process.env }) {
@@ -2551,6 +2568,7 @@ async function main() {
   results.push(...(await sandboxStorageChecks({ inputs, repo, token })));
   results.push(...(await repositoryChecks({ inputs, checkout, runSetup: !!args["run-setup"], local, wf })));
   results.push(...(await runnerChecks({ inputs })));
+  if (!local) results.push(...(await harnessVersionChecks({ inputs })));
   const fails = results.filter((r) => r.status === "FAIL").length;
   if (args.json) process.stdout.write(`${JSON.stringify({ ready: fails === 0, failures: fails, checks: results }, null, 2)}\n`);
   else {

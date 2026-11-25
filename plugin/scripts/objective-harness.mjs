@@ -6,10 +6,16 @@
 //   node scripts/objective-harness.mjs --repo OWNER/NAME (--issue N | --branch pendulum/N)
 // Writes `harness=<name>` to $GITHUB_OUTPUT: empty when no single harness label names one, or the read failed. The review
 // job names its PR's branch (GITHUB_HEAD_REF, from the event): no pull request read, which its token may not be allowed.
+//   node scripts/objective-harness.mjs --resolve <harness> --workflow-harness <name>
+// The exact CLI version the install step installs for <harness> (choice.mjs resolveHarnessVersion), printed alone on
+// stdout, its reason in the job log; when none can be chosen, nothing on stdout and `version_problem` ({reason, fix}) in
+// $GITHUB_OUTPUT, which the stage Blocks on (objective-trust.mjs choiceGate) before any harness runs.
+import { appendFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { choiceOf } from "./lib/choice.mjs";
+import { choiceOf, resolveHarnessVersion } from "./lib/choice.mjs";
 import { getIssue, repoOf } from "./lib/github.mjs";
-import { log, parseArgs, setOutput } from "./lib/inputs.mjs";
+import { CLI } from "./lib/harness.mjs";
+import { harnessMinAgeDays, input, log, logTo, parseArgs, setOutput } from "./lib/inputs.mjs";
 
 /**
  * The harness the Objective's labels name, or "" for the repository's default: its issue (`issue`, or the one a
@@ -22,8 +28,27 @@ export async function labelHarness({ repo, issue = null, branch = "", opts, read
   return c.ok && c.choice.harness ? c.choice.harness : "";
 }
 
+/**
+ * The version a job installs for `harness` (resolveHarnessVersion over the job's harness_version and
+ * harness_min_age_days, as `input` reads them: the action's `with:`, else the workflow's env block), logged with why.
+ */
+export async function installVersion({ harness, workflowHarness, env = process.env, registry, now }) {
+  const pkg = CLI[harness]?.pkg;
+  if (!pkg) return { problem: { reason: `unknown harness ${harness}`, fix: "Set PENDULUM_HARNESS to claude, codex or copilot." } };
+  const r = await resolveHarnessVersion({ harness, pkg, spec: input("harness_version", { env }), workflowHarness, minAgeDays: harnessMinAgeDays(input("harness_min_age_days", { env })), registry, now });
+  log(r.problem ? `harness ${harness}: no version installed: ${r.problem.reason}` : `harness ${harness}: ${pkg}@${r.version}, ${r.why}`);
+  return r;
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  if (args.resolve) {
+    logTo(process.stderr);
+    const r = await installVersion({ harness: String(args.resolve), workflowHarness: String(args.workflow_harness || "") });
+    if (r.problem && process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `version_problem=${JSON.stringify(r.problem)}\n`);
+    if (r.version) process.stdout.write(`${r.version}\n`);
+    return;
+  }
   let harness = "";
   try {
     harness = await labelHarness({ repo: repoOf(args.repo || process.env.GITHUB_REPOSITORY), issue: args.issue, branch: args.branch, opts: { token: process.env.GITHUB_TOKEN } });

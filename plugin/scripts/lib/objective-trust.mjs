@@ -14,7 +14,7 @@ import { log } from "./inputs.mjs";
 import { keptLine } from "./edit-check.mjs";
 import { activationEvents, RESUME_OBJECTIVE } from "./activation.mjs";
 import { goTrust, labelTrust } from "./stop.mjs";
-import { choiceLabels, choiceOf, chosenInputs, foundationLabel, hostsOf, hostsProblem, isChoiceLabel, routeProblem } from "./choice.mjs";
+import { choiceLabels, choiceOf, chosenInputs, foundationLabel, hostsOf, hostsProblem, isChoiceLabel, routeProblem, versionProblem } from "./choice.mjs";
 import { planComment, planTextMarker, stampPlan } from "./handoff.mjs";
 import { waitOnAccounts } from "./account-wait.mjs";
 import { ACCOUNT_LABEL_PREFIX, NO_ACCOUNT, accountLabelNote, routeAccount, routeAccounts, routeAutoAccounts, routeTwoLine } from "./accounts.mjs";
@@ -500,7 +500,7 @@ const ROUTE_PIN_FIX = `Have a person who can push remove the account label or ap
 export async function choiceGate({ repo, issue, labels, args = {}, env = process.env, pr = null, notify, opts, apply, before = null, stage, gh }) {
   const t = await choiceTrusted(repo, issue, labels, opts, gh);
   const c = t.ok ? chosenInputs({ args, env, choice: t.choice }) : t;
-  const refusal = c.ok ? routeProblem(env.PENDULUM_STAGE_HARNESS, c.inputs.harness) || hostsProblem(env.PENDULUM_STAGE_HOSTS, t.hosts) : c;
+  const refusal = c.ok ? routeProblem(env.PENDULUM_STAGE_HARNESS, c.inputs.harness) || versionProblem(env.PENDULUM_STAGE_VERSION_PROBLEM) || hostsProblem(env.PENDULUM_STAGE_HOSTS, t.hosts) : c;
   if (!refusal) return { ...c, labels: t.labels, hosts: t.hosts, foundation: t.foundation };
   if (before) await before();
   await apply(repo, { issue, pr, exit: "blocked", reason: refusal.reason, fix: refusal.fix, cause: "setup", notify, stage }, opts);

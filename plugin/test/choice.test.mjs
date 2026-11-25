@@ -7,7 +7,8 @@ import { test } from "node:test";
 import { choiceLabels, choiceOf, chosenInputs, ranWith, routeProblem } from "../scripts/lib/choice.mjs";
 import { resolveInputs } from "../scripts/lib/inputs.mjs";
 import { pendulumBuild } from "../scripts/lib/release.mjs";
-import { CHOICE_FIX, choiceTrusted, objectiveSha, planTextState } from "../scripts/lib/objective-trust.mjs";
+import { CHOICE_FIX, choiceGate, choiceTrusted, objectiveSha, planTextState } from "../scripts/lib/objective-trust.mjs";
+import { installVersion } from "../scripts/objective-harness.mjs";
 import { setMaintainers } from "../scripts/lib/logic.mjs";
 import { missingCredential, stageEnvironment } from "../scripts/launch.mjs";
 
@@ -145,3 +146,27 @@ test("local mode, the real path: harnessFor reads the issue's labels and their a
   assert.match(refused.reason, /`pendulum:model:claude-sonnet-5-5` was applied by `reader`/);
 });
 
+
+test("harness version: each harness's pin, else the newest release at least 3 days old; an unreadable registry Blocks the stage", async () => {
+  const now = Date.parse("2026-11-24T12:00:00Z");
+  const ago = (days) => new Date(now - days * 86_400_000).toISOString();
+  // A release a day old (the latest tag), a deprecated one, a prerelease: only 2.1.329 is old enough and fit.
+  const doc = { "dist-tags": { latest: "2.1.331" }, time: { created: ago(400), modified: ago(1), "2.1.329": ago(5), "2.1.330": ago(4), "2.1.331-beta.1": ago(10), "2.1.331": ago(1) }, versions: { "2.1.329": {}, "2.1.330": { deprecated: "broken" }, "2.1.331-beta.1": {}, "2.1.331": {} } };
+  const version = (harness, env, registry = async () => doc) => installVersion({ harness, workflowHarness: "claude", env, registry, now });
+  const never = async () => assert.fail("a pinned harness reads no registry");
+  assert.deepEqual(await version("codex", { PENDULUM_HARNESS_VERSION: "claude=2.1.300, codex=0.172.0" }, never), { version: "0.172.0", why: "pinned by harness_version" }, "a label's or an override's harness gets its own pin");
+  assert.deepEqual(await version("claude", { PENDULUM_HARNESS_VERSION: "2.1.300" }, never), { version: "2.1.300", why: "pinned by harness_version" }, "one value pins the workflow's harness");
+  const aged = await version("codex", { PENDULUM_HARNESS_VERSION: "2.1.300" });
+  assert.deepEqual([aged.version, aged.why], ["2.1.329", "the newest release at least 3 days old (published 2026-11-19; latest is 2.1.331)"]);
+  const down = await version("claude", {}, async () => {
+    throw new Error("getaddrinfo ENOTFOUND registry.npmjs.org");
+  });
+  assert.equal(down.version, undefined, "never the newest release in its place");
+  // The install step hands the stage its problem (version_problem): the stage Blocks with it before any harness runs.
+  const applied = [];
+  const gate = await choiceGate({ repo, issue: 7, labels: ["pendulum:objective"], env: { ...ENV, PENDULUM_STAGE_HARNESS: "claude", PENDULUM_STAGE_VERSION_PROBLEM: JSON.stringify(down.problem) }, pr: null, notify: "boss", opts: {}, apply: async (_, e) => applied.push(e), stage: "work", gh: {} });
+  assert.equal(gate.ok, false);
+  assert.deepEqual([applied[0].exit, applied[0].cause], ["blocked", "setup"]);
+  assert.match(applied[0].reason, /npm registry could not be read for @anthropic-ai\/claude-code/);
+  assert.match(applied[0].fix, /^Pin a version: set harness_version/);
+});

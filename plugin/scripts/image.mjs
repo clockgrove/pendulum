@@ -24,7 +24,8 @@ import { mintInstallationToken } from "./lib/app-token.mjs";
 import { getRepo, onDefaultBranch, repoOf, rest } from "./lib/github.mjs";
 import { CLI } from "./lib/harness.mjs";
 import { IMAGE_DIR, NIGHTLY_CRON, imageDecision, imageMade, imagePaths, imageTouch, imageWaits, owedAttempt, imageTags, currentBuild, listImages, prunableImages, recordCover, recordImage, staleImages, todaysBuildMs, vendorImages, verifiedRecords } from "./lib/image.mjs";
-import { SECRET_INPUTS, log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
+import { HARNESS_MIN_AGE_DAYS, SECRET_INPUTS, log, mask, parseArgs, resolveInputs, setOutput, workflowHarness } from "./lib/inputs.mjs";
+import { resolveHarnessVersion } from "./lib/choice.mjs";
 import { setSelf, setupGuard } from "./lib/logic.mjs";
 import { armSweepWake } from "./dispatch.mjs";
 import { checkoutIo } from "./doctor.mjs";
@@ -111,7 +112,7 @@ export const PACKAGE_CLEAN = [
  * stopped, as the vendor's record). Returns the snapshot and its source sandbox; throws with `buildMs` and the step that
  * failed, the sandbox destroyed. Command output goes to the job log only.
  */
-export async function buildImage({ adapter, base, bundle, repo, branch, sha, setup, install, tools = [], harnessVersion, versions = null, tags }) {
+export async function buildImage({ adapter, base, bundle, repo, branch, sha, setup, install, tools = [], versions, tags }) {
   const started = Date.now();
   const elapsed = () => Date.now() - started;
   const { checkout, envFile } = imagePaths(repo);
@@ -167,8 +168,11 @@ export async function buildImage({ adapter, base, bundle, repo, branch, sha, set
         throw absent.length ? Object.assign(new Error(`${e.message}: ${absentTools(absent)}`), { step: e.step }) : e;
       });
     }
-    // The exact versions the build's `made` names (harnessVersions), else the setting as given.
-    const pkgs = Object.values(CLI).map((c) => `${c.pkg}@${versions?.[c.pkg] || harnessVersion || "latest"}`);
+    // The exact versions the build's `made` names (harnessVersions): one missing fails the build, never installs another.
+    const pkgs = Object.values(CLI).map((c) => {
+      if (!versions?.[c.pkg]) throw Object.assign(new Error(`no version was chosen for ${c.pkg}`), { step: "harness CLIs" });
+      return `${c.pkg}@${versions[c.pkg]}`;
+    });
     // As on the runner (action.yml): Claude Code's postinstall puts its native binary in place, and npm 11 runs install
     // scripts only for packages allowed by name (npm 10, on node:22, ignores the flag and runs them all, as on the
     // runner). Each CLI must then answer --version, or the build fails.
@@ -216,50 +220,45 @@ export async function imageChange(checkout, from, head, { setup = "", install = 
   return { touched: imageTouch(files, guards, toolchainPaths) };
 }
 
-/** `npm view <pkg>@<spec> version`: the newest version the spec names, or null when the registry does not answer one. */
-function npmView(pkg, spec) {
-  try {
-    const j = JSON.parse(execFileSync("npm", ["view", `${pkg}@${spec}`, "version", "--json"], { encoding: "utf8", timeout: 60_000, stdio: ["ignore", "pipe", "ignore"] }));
-    const v = Array.isArray(j) ? j.at(-1) : j;
-    return typeof v === "string" && EXACT.test(v) ? v : null;
-  } catch {
-    return null;
-  }
-}
-const EXACT = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
-
 /**
- * Each harness CLI's exact version for `spec` (harness_version: a version, or a tag or range such as `latest`), as
- * {package: version}: an exact version as given, anything else from the registry (`view`, npm view, as a stage's start
- * script resolves `latest`). Null when one cannot be read.
+ * Each harness CLI's exact version for the image, as {versions: {package: version}, lines}: choice.mjs
+ * resolveHarnessVersion for each harness (its pin in `spec`, harness_version, one value pinning the workflow's harness
+ * `own`; else the newest release at least `minAgeDays` old from `registry`), and a line for the job log on each (the
+ * version and why, or why none). `versions` is null when one cannot be chosen: nothing is built then, nor is the head
+ * taken as unchanged.
  */
-export function harnessVersions(spec, { view = npmView } = {}) {
-  const want = String(spec || "").trim() || "latest";
+export async function harnessVersions(spec, { workflowHarness: own = "claude", minAgeDays = HARNESS_MIN_AGE_DAYS, registry, now } = {}) {
   const out = {};
-  for (const c of Object.values(CLI)) {
-    const v = EXACT.test(want) ? want : view(c.pkg, want);
-    if (!v) return null;
-    out[c.pkg] = v;
+  const lines = [];
+  let ok = true;
+  for (const [harness, c] of Object.entries(CLI)) {
+    const r = await resolveHarnessVersion({ harness, pkg: c.pkg, spec, workflowHarness: own, minAgeDays, ...(registry ? { registry } : {}), ...(now ? { now } : {}) });
+    if (r.problem) {
+      ok = false;
+      lines.push(`harness ${harness}: no version: ${r.problem.reason}. ${r.problem.fix}`);
+    } else {
+      out[c.pkg] = r.version;
+      lines.push(`harness ${harness}: ${c.pkg}@${r.version}, ${r.why}`);
+    }
   }
-  return out;
+  return { versions: ok ? out : null, lines };
 }
 
 /**
  * What this image job does about `head` in `checkout` (its clone of the default branch): the install command and the
  * INSTALLS entries it runs (`install`, `tools`), the harness CLIs' exact versions (`versions`, harnessVersions with
- * `view`), what a build now would be made from (`made`, imageMade with Pendulum's own digest, `pendulum`), whether the
+ * `registry`), what a build now would be made from (`made`, imageMade with Pendulum's own digest, `pendulum`), whether the
  * head changes anything the current image is made from (`change`, imageChange: asked only of an image made the same
  * way, for a head it neither is nor covers), imageDecision's answer (`decision`), what to log (`notes`), and, when the
  * decision covers the head, what recordCover records (`cover`, with the owed job's own `attempt`). `builds`: the
  * record, newest first; `current`: the newest confirmed, ready image.
  */
-export async function imagePlan({ checkout, head, trigger, inputs, base, current, builds = [], attempt = null, todayMs = 0, pendulum = pluginDigest(), view, now = new Date(), env = process.env }) {
+export async function imagePlan({ checkout, head, trigger, inputs, base, current, builds = [], attempt = null, todayMs = 0, pendulum = pluginDigest(), registry, now = new Date(), env = process.env }) {
   const install = installCommand(checkout, inputs.install);
   const tools = installTools(checkout, inputs.install);
-  const versions = harnessVersions(inputs.harnessVersion, view ? { view } : {});
+  const { versions, lines } = await harnessVersions(inputs.harnessVersion, { workflowHarness: workflowHarness(env), minAgeDays: inputs.harnessMinAgeDays, registry });
   const made = imageMade({ setup: inputs.setup, install, versions, base, pendulum });
-  const notes = [];
-  if (!versions) notes.push(`the harness CLIs' versions for ${inputs.harnessVersion || "latest"} could not be read from the registry, so this head is not taken as unchanged`);
+  const notes = [...lines];
   const comparable = !!current && current.sha !== head && !!made && current.made === made && current.covers !== head;
   if (current && current.sha !== head && made && current.made !== made) notes.push(`${current.sha.slice(0, 7)}'s image was built otherwise (setup, install, a harness CLI's version, the base image or Pendulum itself), or before Pendulum recorded how`);
   const change = comparable ? await imageChange(checkout, current.sha, head, { setup: inputs.setup, install, toolchainPaths: inputs.toolchainPaths, env }) : null;
@@ -348,6 +347,13 @@ async function main() {
     return done("skipped", decision.skip);
   }
   if (decision.note) log(`image: ${decision.note}`);
+  // No harness CLI version chosen (the lines above say why): nothing is built, and never on the newest release instead.
+  if (!versions) {
+    summary(`### Pendulum sandbox image\n\nNot built: a harness CLI version could not be chosen (the job log names why; pin one with harness_version).`);
+    done("failed", "no harness CLI version could be chosen");
+    process.exitCode = 1;
+    return;
+  }
   // The attempt, recorded before the build's first vendor change: a crash or a timeout past here leaves it, so the
   // dispatcher owes this head no build (lib/image.mjs imageOwed). The build's own entry replaces it (withBuild).
   if (!attempt) {
@@ -382,7 +388,7 @@ async function main() {
   let built;
   let failure = null;
   try {
-    built = await buildImage({ adapter, base, bundle, repo, branch, sha: head, setup: inputs.setup, install, tools, harnessVersion: inputs.harnessVersion, versions, tags: imageTags(repoId, head) });
+    built = await buildImage({ adapter, base, bundle, repo, branch, sha: head, setup: inputs.setup, install, tools, versions, tags: imageTags(repoId, head) });
   } catch (e) {
     failure = e;
   } finally {
