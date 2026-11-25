@@ -85,7 +85,7 @@ export const DEFAULTS = {
   harness_version: "latest", // choice.mjs harnessPins: one exact version for the workflow's harness, or `claude=<version>,codex=<version>`
   harness_min_age_days: String(HARNESS_MIN_AGE_DAYS), // choice.mjs resolveHarnessVersion: `latest` is the newest release at least this old
   allowed_domains: "", // The harness's sandbox (Claude Code, Codex, Copilot) on Actions and in a cloud sandbox: hosts its commands may reach beyond GitHub and the npm and Yarn registries (local.mjs runnerDomains)
-  node_version: "22",
+  node_version: "24",
   project: "", // the Pendulum board's node id, recorded by setup (github.mjs findProject); empty: the board titled exactly "Pendulum: <repo>"
   action: `clockgrove/pendulum@v${PENDULUM_VERSION}`,
   objective_label: "pendulum:objective",

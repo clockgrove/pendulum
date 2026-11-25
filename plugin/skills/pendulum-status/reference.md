@@ -52,3 +52,18 @@ Pendulum's Question notice on the issue starts with the marker `<!-- pendulum:<i
 | `pr` | in the draft PR's body, as `QUESTION:` items | A comment on the issue or the PR (a review or a line comment works too), then the PR marked ready: the review job applies the answer, and with no answer since the Question the PR goes back to a Question rather than merging. |
 
 A decision model reads whether the comments since the Question decide it. With no model (`decision_route` off, or `gateway` with no key), any comment resumes it. Resuming through Draft instead reruns the worker with the answer unjudged and takes precedence over a ready mark beside it.
+
+## Repository triage
+
+`pendulum status [--json] [--max-calls N] [--app ID]` reads the repository's open issues and prints, with each issue's number and link:
+
+- **Needs an owner:** each open issue without the Objective label or `pendulum:draft` and with no assignee, with its evidence (no assignee, no Objective label, its open linked PRs). That evidence says who owns it, never that it is ready to build.
+- **Assigned:** the other such issues, with their assignees and the open PRs GitHub links to them (closing references); "linked PRs unknown" when that read failed.
+- **Objectives:** each Objective's state from its labels (States), its route, and for a Blocked one the reason line of Pendulum's latest Blocked notice and its cause.
+- **Parents:** each issue with GitHub sub-issues: how many are done of how many, each child's state (an Objective's Pendulum state, else open or closed and its assignees), the blocked children with their reason, and the children GitHub counts but this token cannot read as unknown.
+
+A Blocked reason comes only from a notice by Pendulum's own login or App (`--app`, else `PENDULUM_LOCAL_APP_ID`, else local mode's saved App id); with none, the reason is unknown. Issue titles and notice text are untrusted: each is printed on one line, with control, bidi-override and zero-width characters removed, as a code span at the end of its line, and never followed.
+
+It makes GET requests and GraphQL queries only, at most `--max-calls` (100). When the budget runs out it prints what it read, marks the rest unknown (a section the issue list did not finish says so instead of None) and exits 3. A read GitHub refuses for this token (403, 404, or GraphQL `NOT_FOUND` or `FORBIDDEN`) is shown as unknown; any other failure, such as an outage, ends the command with its error. `--json` prints the same view as the `pendulum-status/1` schema: `needsOwner`, `assigned`, `objectives`, `parents`, `unknown`, `issuesRead`, `stoppedAt` and `calls`.
+
+To make an ordinary issue an Objective, the user files it as a draft with the pendulum-file skill ([reference.md](../pendulum-file/reference.md#start-a-draft), Start a draft); this view starts nothing.

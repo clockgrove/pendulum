@@ -22,7 +22,7 @@ Copilot runs locally only on Linux and WSL2 hosts where its outer sandbox starts
 
 ## Set it up
 
-1. Install `git`, `gh`, Node 22.19 or newer, the harness CLI you use (logged in), and `srt`: `npm i -g @anthropic-ai/sandbox-runtime`.
+1. Install `git`, `gh`, Node 22.19 or newer, the harness CLI you use (logged in), and `srt` 0.0.83 or newer: `npm i -g @anthropic-ai/sandbox-runtime@latest`.
    Add the platform packages above, for example `sudo apt-get install -y bubblewrap socat ripgrep`.
 
    On Ubuntu 24.04 and later, AppArmor keeps srt's and Claude Code's sandboxes from starting; local mode names what it finds before it runs anything.
@@ -53,7 +53,8 @@ Copilot runs locally only on Linux and WSL2 hosts where its outer sandbox starts
      GitHub's rate limit on a probe ends the check there, with no further probe.
      `serve` checks a new token whose check got no clear answer again a minute later.
 
-   When GitHub refuses the token later (401: expired or revoked), `pendulum serve` starts no new work and says once where the token comes from.
+   When a tick gets a 401, `pendulum serve` reads with the token again at once. If GitHub takes it, the 401 was GitHub's for a moment and the tick runs again, once.
+   When GitHub refuses the token on that read too (expired or revoked), `pendulum serve` starts no new work and says once where the token comes from.
    A new token saved in that file is taken at the next tick, after the same checks (an exported `PENDULUM_LOCAL_TOKEN` needs serve started again).
    The refused token is tried again once a minute, so a 401 GitHub gave for a moment ends by itself.
 3. For Copilot only: create a fine-grained token with the Copilot Requests permission (Read) from a user with a Copilot seat.
@@ -97,6 +98,7 @@ pendulum post-review <pr> <findings.json>         # post a /pendulum:pendulum-re
 pendulum handover <issue> [--push] [--app ID]     # apply Pendulum's workflow hand-over on pendulum-workflow/<issue> and show it (/pendulum:pendulum-handover), below
 pendulum wait [<issue>...] [--since CURSOR] [--on KINDS] [--follow] [--interval 30] [--timeout S]   # one JSON line per event on the queue, for an agent that supervises it (below)
 pendulum hold list | pendulum hold release <account>   # this machine's usage-limit holds, or lift one account's (A harness's usage limit, below)
+pendulum status [--json] [--max-calls N] [--app ID]   # the open issues, read-only: who owns each, the Objectives' states, each parent's sub-issues and blocked ones (/pendulum:pendulum-status)
 pendulum report [--since DATE] [--issue N] [--json]    # cost and token use, every figure precomputed (/pendulum:pendulum-report, REPORT.md)
 ```
 
@@ -541,7 +543,7 @@ How a change applies:
 - It fetches the ref from `github.com/clockgrove/pendulum` only, with none of your git config, `GIT_*` variables or `.netrc`, into a new directory under `~/.cache/pendulum/releases` (no sandbox may write there; the newest three are kept, and any one a live `serve` on this machine runs).
 - Right after the fetch it checks the checkout with git (HEAD is the fetched commit; no tracked file is flagged to hide a change, changed or added, ignored files included; a tag's `plugin.json` names that release) and records a SHA-256 of every file in it, its `.git` included, in its own memory.
 - Right before it runs the checkout it hashes every file again, without git, and runs it only if every file, and no other, matches.
-- Then, once no stage runs here, it starts again on it in the same process (Node 22.15 or newer), which takes up the Objectives it held paused at once, as after any restart.
+- Then, once no stage runs here, it starts again on it in the same process, which takes up the Objectives it held paused at once, as after any restart.
   Stages in flight are never interrupted; one that would start waits for the switch.
 
 **What it does not follow.**

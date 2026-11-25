@@ -12,8 +12,8 @@
 // serve takes only those unless --all (PENDULUM_LOCAL_ALL=1). Where no Action runs (GitHub lists no active pendulum.yml
 // workflow), serve labels each Objective it picks pendulum:local first. A claim comment with a heartbeat marks one in flight.
 // Needs git, gh, the harness CLI (claude or codex logged in; copilot with a Copilot Requests token in
-// COPILOT_GITHUB_TOKEN or ~/.config/pendulum/copilot-token, plus slirp4netns and iptables on Linux), srt
-// (npm i -g @anthropic-ai/sandbox-runtime), ripgrep and, on Linux and WSL2, bubblewrap and socat; and a
+// COPILOT_GITHUB_TOKEN or ~/.config/pendulum/copilot-token, plus slirp4netns and iptables on Linux), srt 0.0.83
+// or newer (npm i -g @anthropic-ai/sandbox-runtime@latest), ripgrep and, on Linux and WSL2, bubblewrap and socat; and a
 // fine-grained token for this one repository, in PENDULUM_LOCAL_TOKEN or ~/.config/pendulum/tokens/<owner>/<name>
 // (contents, issues and pull requests read and write; actions and variables read). That token is all the GitHub reach the
 // model gets. No App needed (one in PENDULUM_LOCAL_APP_ID posts the notices), no vendor, no API key; GitHub holds
@@ -37,6 +37,7 @@ import { githubStatus } from "./lib/adapters/github-status.mjs";
 const requestKey = (o) => `${o.origin ?? o.host ?? ""} ${o.endpoint ?? ""}`;
 const pausesText = (n) => `${n} pause${n === 1 ? "" : "s"}`;
 import { PLUGIN_ROOT, installCommand } from "./lib/checkout.mjs";
+import { STATUS_MAX_CALLS, readStatus, renderStatus } from "./lib/status.mjs";
 import { DEFAULT_DAYS, DEFAULT_MAX_CALLS, PARTIAL_CODES, REPORT_SCHEMA, STOPPED_EXIT, buildReport, readReport, renderReport, reportCheck, reportModels, reportScope } from "./lib/report.mjs";
 import { ghLoginToken, activeWorkIssues, addLabels, collaboratorPermission, ensureLabel, hasMergeQueue, findPr, mergeQueueEntry, mergeQueueHeads, findProject, getIssue, getPr, getPrSettled, labeledAtIn, listComments, listIssuesByLabel, markReady, moveCard, postReview, prComment, prDiff, primeSelf, primeWriters, removeLabel, repoOf, rest, setStateLabel, transientError, upsertComment, organizationVariableNames, repositoryVariables } from "./lib/github.mjs";
 import { PENDULUM_VERSION, LOCAL_BOUNDS, holdSecrets, input, timeZoneName, localBound, localLimits, log, logTo, postedError, readFlags, redactSecrets, resolveInputs, workflowDriftLines, workflowSettings, MACHINE_FALLBACK_SETTINGS, MACHINE_SETTINGS, MODEL_SETTINGS, ignoredLines, layerLines, machineSettings, organizationVariablesLine, settingLayers } from "./lib/inputs.mjs";
@@ -62,7 +63,7 @@ import { bwrapShim, claudeEnvText, localTools, stageCommands } from "./lib/copil
 import { noticeMinter, serveNotices } from "./lib/app-token.mjs";
 import { appIdSetLine, appIdWhyText, learnAppId, readLocalAppId } from "./lib/app-id.mjs";
 import { answeredRepos, declaredQuestion, planNeeds as planNeedsOf } from "./lib/one-repo.mjs";
-import { localDatabaseChecks, noticeAppCheck, pluginVersionCheck } from "./doctor.mjs";
+import { localDatabaseChecks, noticeAppCheck, pluginVersionCheck, srtCheck, srtVersion } from "./doctor.mjs";
 import { RELEASES_URL, checkoutProblem, markInUse, pinDecision, releaseCheckout, runningPendulum, runningName, startProblem } from "./lib/release.mjs";
 import { SKIP_SMUDGE_ENV, lfsPinEnv } from "./lib/lfs.mjs";
 import { EDITED_REASON, authorGate, foundationTrusted, labelsVouched, objectiveInputs, planStateNow, recordText, settled, startTime, trustedIssue } from "./lib/objective-trust.mjs";
@@ -283,6 +284,11 @@ export const COMMANDS = {
     check: reportCheck,
     about: `cost and token use of a period (--since, --until; the ${DEFAULT_DAYS} days before --until or now, from UTC midnight, by default) or a set of Objectives (--issue, --label, --parent), or two experiment arms side by side (--compare A,B: the pendulum:experiment:<name> labels; --compare-label for any two labels), every figure precomputed (--rates: the ratio of each named model's published rates to each recorded model's of one vendor, on its recorded token mix, no dollar unit): --json for the documented schema (${REPORT_SCHEMA}), else Markdown; prints its planned GitHub calls first and stops at --max-calls (${DEFAULT_MAX_CALLS}), exiting ${STOPPED_EXIT} with what it read`,
   },
+  status: {
+    args: [],
+    flags: { ...WHERE, json: "bool", "max-calls": { value: "N", number: true }, app: { value: "ID", number: true } },
+    about: `the repository's open issues, read-only: those that need an owner (no assignee) with the evidence, the assigned ones with their linked PRs, the Objectives by state, and each parent's sub-issues with the blocked ones and their recorded reason, anything unread as unknown; writes nothing and starts nothing; --json for the schema; at most --max-calls GitHub calls (${STATUS_MAX_CALLS}), exits ${STOPPED_EXIT} when they stopped it`,
+  },
   zone: { args: [], flags: {}, about: "this machine's time zone as the hidden line an Objective's body starts with (<!-- pendulum:tz NAME -->), so the times its stages write read in its filer's zone; pendulum-file adds it" },
   hold: {
     args: ["list|release"],
@@ -444,7 +450,11 @@ export function preflight(harness, repoFull, token, copilotToken, { outer = oute
   const problems = [];
   if (!onPath("git")) problems.push("git is not on PATH; install git (https://git-scm.com/downloads)");
   if (!onPath("gh")) problems.push("gh is not on PATH; install the GitHub CLI (https://cli.github.com)");
-  if (!onPath("srt")) problems.push("srt is not on PATH; Pendulum's own commands run in it (npm i -g @anthropic-ai/sandbox-runtime)");
+  if (!onPath("srt")) problems.push("srt is not on PATH; Pendulum's own commands run in it (npm i -g @anthropic-ai/sandbox-runtime@latest)");
+  else {
+    const srt = srtCheck(true, srtVersion());
+    if (srt.status === "FAIL") problems.push(`${srt.detail} (${srt.fix})`);
+  }
   if (!onPath("rg")) problems.push("rg (ripgrep) is not on PATH; the sandbox needs it");
   if (platform() === "linux") for (const bin of ["bwrap", "socat"]) if (!onPath(bin)) problems.push(`${bin} is not on PATH; the sandbox needs it (sudo apt-get install -y bubblewrap socat)`);
   const startProblems = platform() === "linux" && onPath("srt") && onPath("bwrap") ? sandboxStartProblems() : [];
@@ -3895,7 +3905,7 @@ export class Local {
     const script = join(r.checkout.dir, "plugin", "scripts", "local.mjs");
     if (typeof process.execve !== "function") {
       r.state = "manual";
-      log(`this Node (${process.version}) cannot start serve again in its own process (process.execve needs Node 22.15 or newer): serve goes on with ${runningName(this.pendulum)}; restart it with ${join(r.checkout.dir, "plugin", "bin", "pendulum")} serve to run clockgrove/pendulum@${r.ref}`);
+      log(`this Node (${process.version}) has no process.execve to start serve again in its own process: serve goes on with ${runningName(this.pendulum)}; restart it with ${join(r.checkout.dir, "plugin", "bin", "pendulum")} serve to run clockgrove/pendulum@${r.ref}`);
       return false;
     }
     const problem = checkoutProblem(r.checkout);
@@ -3983,8 +3993,11 @@ export class Local {
     let left = box.room;
     let force = running.size === 0;
     const held = [];
+    // Held slots no start was promised (reclaim): a take hands these out before it takes new ones.
+    let unclaimed = 0;
     const take = (n) => {
-      let got = 0;
+      let got = Math.min(n, unclaimed);
+      unclaimed -= got;
       while (got < n && left > 0) {
         const slot = this.slotFor(box, force, { cmd: "serve" });
         if (!slot) {
@@ -4011,9 +4024,15 @@ export class Local {
       );
     };
     const spare = () => {
+      unclaimed = 0;
       for (const slot of held.splice(0)) slot.release();
     };
-    return { take, left: () => left, start, spare };
+    // A dispatch that threw after taking slots (serve's tick, run again on a 401 GitHub took back): its slots, not yet
+    // started, go to the next take, so the dispatch run again has the tick's full room.
+    const reclaim = () => {
+      unclaimed = held.length;
+    };
+    return { take, left: () => left + unclaimed, start, spare, reclaim };
   }
 
   /**
@@ -4162,17 +4181,27 @@ export class Local {
       const marked = [];
       // No Action runs here (actionState): this loop picks the Objectives without pendulum:local too, labelling each first.
       const adopt = (await this.actionState().catch(() => null)) === "none";
-      this.dispatching = dispatch(inputs, { token: this.token, decisionRole: "serve", adopt, notice: this.notice, localSlots: waitLine ? 0 : slots.left(), localTake: slots.take, localFull: waitLine || box.why || "this loop is at PENDULUM_LOCAL_MAX_CONCURRENT", localHeld, localHold: (issue) => this.limitHold(issue.labels, issue.number, issue.updated_at ?? null), localStopped, localLive: (n) => !!liveStage(this.ws(n)), localStopping: () => !!this.stopping, localMarked: (n) => marked.push(n), thirdPartyReads: (this.thirdPartyReads ??= new Map()), readCache: (this.timelines ??= new Map()) }).catch(async (e) => {
-        // A 401 the local token itself gets again (not the notice App's): GitHub no longer takes it. Said once, by source.
-        if (e?.status === 401 && (await rest(`repos/${this.repo.full}`, { token: this.token }).then(() => false, (x) => x?.status === 401))) {
+      const tick = () => dispatch(inputs, { token: this.token, decisionRole: "serve", adopt, notice: this.notice, localSlots: waitLine ? 0 : slots.left(), localTake: slots.take, localFull: waitLine || box.why || "this loop is at PENDULUM_LOCAL_MAX_CONCURRENT", localHeld, localHold: (issue) => this.limitHold(issue.labels, issue.number, issue.updated_at ?? null), localStopped, localLive: (n) => !!liveStage(this.ws(n)), localStopping: () => !!this.stopping, localMarked: (n) => marked.push(n), thirdPartyReads: (this.thirdPartyReads ??= new Map()), readCache: (this.timelines ??= new Map()) });
+      // A 401 on the dispatch: the local token is read again at once. GitHub refusing it again means it no longer takes it
+      // (said once, by source). GitHub taking it means the 401 was GitHub's for a moment (#659): the tick's dispatch runs
+      // again, once; a second 401 is checked the same way and, taken again, fails the tick.
+      const failed = (again) => async (e) => {
+        const taken = e?.status === 401 ? await rest(`repos/${this.repo.full}`, { token: this.token }).then(() => true, (x) => (x?.status === 401 ? false : null)) : null;
+        if (taken === false) {
           refused = this.token;
           probeAt = Date.now() + REFUSED_PROBE.ms;
           log(`GitHub refused the local token (HTTP 401: expired or revoked): no new work starts on this box until it is renewed in ${tokenSource(this.repoFull)}; stages already running end as they can`);
           return { ready: [], refused: true };
         }
+        if (taken && again && !this.stopping) {
+          log(`GitHub refused the local token once (HTTP 401: ${e.message.slice(0, 160)}) and accepted it on the re-check; the tick runs again`);
+          slots.reclaim();
+          return tick().catch(failed(false));
+        }
         log(`dispatch failed: ${e.message.slice(0, 200)}`);
         return { ready: [] };
-      }).then(async (r) => {
+      };
+      this.dispatching = tick().catch(failed(true)).then(async (r) => {
         // The tick's decision calls outside a stage that no record carried: this loop's decisions comment (decision-spend.mjs).
         await flushDecisionSpend(this.repo, this.opts, { role: "serve" });
         // A stop that came while it ran: the picks it marked Running start nothing and go back to Queued, before the exit,
@@ -4830,6 +4859,30 @@ export async function reportCommand(flags, { out = (t) => process.stdout.write(t
 }
 
 /**
+ * `pendulum status`: the repository's open issues as a read-only triage view (lib/status.mjs) of the repository (--repo,
+ * else the clone's origin; with --repo it runs outside a clone too), read with the local token, else the gh login. JSON
+ * with --json, else Markdown, on stdout; Pendulum's log lines on stderr. Returns 0, or STOPPED_EXIT when the call budget
+ * stopped the reads (the view printed is partial).
+ */
+export async function statusCommand(flags, { out = (t) => process.stdout.write(t), err = (t) => process.stderr.write(t), token = null, env = process.env } = {}) {
+  const here = resolve(flags.checkout || process.cwd());
+  let checkout = null;
+  try {
+    checkout = cloneTop(here, "--repo OWNER/NAME");
+  } catch (e) {
+    if (!flags.repo) throw e;
+  }
+  const repoFull = cloneRepo(checkout ?? here, flags.repo);
+  logTo(process.stderr);
+  const { objectiveLabel } = resolveInputs({ args: { repo: repoFull }, env });
+  const envAppId = /^\d+$/.test(String(env.PENDULUM_LOCAL_APP_ID ?? "").trim()) ? Number(env.PENDULUM_LOCAL_APP_ID) : null;
+  const appId = flags.app ?? envAppId ?? readLocalAppId(repoFull).id ?? null;
+  const view = await readStatus(repoOf(repoFull), { token: token ?? sessionToken(repoFull), appId, objectiveLabel, maxCalls: flags["max-calls"] ?? STATUS_MAX_CALLS, log: (line) => err(`${line}\n`) });
+  out(flags.json ? `${JSON.stringify(view, null, 2)}\n` : renderStatus(view));
+  return view.stoppedAt === null ? 0 : STOPPED_EXIT;
+}
+
+/**
  * `pendulum doctor`: doctor.mjs --local on the clone (its top directory) and its repository, --repo else the clone's
  * origin (cloneRepo); with --repo, it runs outside a clone too. Returns doctor's exit code.
  */
@@ -4960,6 +5013,10 @@ async function main() {
   }
   if (cmd === "report") {
     process.exitCode = await reportCommand(flags);
+    return;
+  }
+  if (cmd === "status") {
+    process.exitCode = await statusCommand(flags);
     return;
   }
   if (cmd === "zone") {

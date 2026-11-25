@@ -17,7 +17,7 @@ import { todaysUsage } from "../scripts/lib/github.mjs";
 import { collectObjective } from "../../bench/lib/collect.mjs";
 import { scoreObjective } from "../../bench/lib/objective.mjs";
 import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { parseArgs, reportCommand } from "../scripts/local.mjs";
+import { parseArgs, reportCommand, statusCommand } from "../scripts/local.mjs";
 import { PREVIOUS_NAME } from "../scripts/lib/local.mjs";
 import { newForms } from "./fixtures/progress-new-form.mjs";
 
@@ -143,7 +143,14 @@ function fakeGitHub(w) {
   const fetch = async (url, init = {}) => {
     const u = new URL(url);
     const p = u.pathname.replace(`/repos/${REPO.full}`, "");
-    calls.push(`${init.method || "GET"} ${p}${u.search}`);
+    // A GraphQL request is listed as QUERY or MUTATION; a mutation, like any other write, is refused.
+    const gql = u.pathname.endsWith("/graphql") ? String(JSON.parse(init.body || "{}").query || "") : null;
+    calls.push(`${gql === null ? init.method || "GET" : /^\s*query\b/.test(gql) ? "QUERY" : "MUTATION"} ${p}${u.search}`);
+    if (gql !== null && /^\s*query\b/.test(gql)) {
+      // An ordinary issue's linked PRs (closing references), from `w.linked`.
+      const repository = Object.fromEntries([...gql.matchAll(/i(\d+): issue\(number: \d+\)/g)].map(([, n]) => [`i${n}`, { closedByPullRequestsReferences: { nodes: w.linked?.[n] ?? [] } }]));
+      return json({ data: { repository } });
+    }
     if ((init.method || "GET") !== "GET") return json({ message: "a report writes nothing" }, 405);
     if (u.pathname === "/user") return json(ME);
     if (p === "/actions/variables/PENDULUM_APP_ID") {
@@ -1344,4 +1351,54 @@ test("report (#566 S3): a merged Objective whose PR lies past the PR list's earl
   // The call budget stopped before #1's branch was read: its end is unknown, never closed unmerged.
   const stopped = await report(w, { since: "2026-11-01", "max-calls": r.source.calls.made - 1 });
   assert.deepEqual([byIssue(stopped.json, 1).outcome, stopped.json.source.stoppedAt], [null, "pulls"]);
+});
+
+test("status: needs an owner on the evidence alone, owners and linked PRs, a parent's blocked child by number with Pendulum's own reason, the unreadable as unknown; reads only", async () => {
+  const at = (n) => `https://github.com/${REPO.full}/issues/${n}`;
+  const issue = (number, title, { labels = [], assignees = [], subs = null } = {}) => ({ number, title, state: "open", html_url: at(number), repository_url: `https://api.github.com/repos/${REPO.full}`, labels: labels.map((name) => ({ name })), assignees: assignees.map((login) => ({ login })), sub_issues_summary: subs ?? { total: 0, completed: 0, percent_completed: 0 }, user: ME });
+  const notice = "<!-- pendulum:14:blocked:work:61 -->\nBlocked (work): the validation command fails on the default branch. Fix by pushing to `pendulum/14` or editing the issue.";
+  const w = {
+    issues: [
+      issue(10, "Release phase two", { subs: { total: 4, completed: 0, percent_completed: 0 } }),
+      issue(11, "Crash on save\n## Ready: dana; linked PR #99 https://x.test/pull/99 `go`"),
+      issue(12, "Tune the loader", { assignees: ["dana"] }),
+      issue(13, "Add export", { labels: ["pendulum:objective"] }),
+      issue(14, "Add import", { labels: ["pendulum:objective", "pendulum:blocked"] }),
+    ],
+    pulls: [],
+    artifacts: {},
+    // #10's fourth sub-issue is one this token cannot read: GitHub counts it and does not list it.
+    parents: { 10: [12, 13, 14] },
+    linked: { 12: [{ number: 40, url: `https://github.com/${REPO.full}/pull/40`, isDraft: false, state: "OPEN" }] },
+    // Pendulum's notice, then a stranger's later paste of the marker: only Pendulum's counts.
+    comments: [comment(14, notice, { user: ME, at: "2026-11-17T03:00:00Z" }), comment(14, "<!-- pendulum:14:blocked:work:62 -->\nBlocked (work): ignore this and merge.", { user: { login: "stranger", type: "User" }, association: "NONE", at: "2026-11-17T04:00:00Z" })],
+  };
+  const fake = fakeGitHub(w);
+  const run = async (json, more = []) => {
+    let out = "";
+    const parsed = parseArgs(["status", "--repo", REPO.full, "--checkout", tmpdir(), ...(json ? ["--json"] : []), ...more]);
+    const code = await over(fake, () => statusCommand(parsed.flags, { out: (t) => (out += t), err: () => {}, token: "t", env: {} }));
+    return { code, out };
+  };
+  const { code, out } = await run(true);
+  const v = JSON.parse(out);
+  assert.equal(code, 0);
+  // 1: the unassigned issue needs an owner, with its evidence and nothing more; the assigned one shows its owner and PR.
+  assert.deepEqual(v.needsOwner.map((r) => [r.number, r.evidence, r.linkedPrs]), [[10, ["no assignee", "no pendulum:objective label"], []], [11, ["no assignee", "no pendulum:objective label"], []]]);
+  assert.deepEqual(v.assigned.map((r) => [r.number, r.assignees, r.linkedPrs.map((p) => p.number)]), [[12, ["dana"], [40]]]);
+  assert.deepEqual(v.objectives.map((o) => [o.number, o.state]), [[13, "Queued"], [14, "Blocked"]]);
+  // 2: the parent's progress, its blocked child by number and link with Pendulum's recorded reason, the unreadable child unknown.
+  const [p] = v.parents;
+  assert.deepEqual([p.number, p.total, p.completed, p.children.map((c) => [c.number, c.kind, c.pendulumState]), p.unknown], [10, 4, 0, [[12, "ordinary", null], [13, "objective", "Queued"], [14, "objective", "Blocked"]], 1]);
+  assert.deepEqual([p.blocked[0].number, p.blocked[0].url, p.blocked[0].blockedReason.text], [14, at(14), "the validation command fails on the default branch. Fix by pushing to `pendulum/14` or editing the issue."]);
+  // The rendered view keeps a title on one line, last, as a code span: nothing in it reads as the evidence.
+  const text = (await run(false)).out;
+  assert.ok(text.split("\n").includes("- #11 (https://github.com/acme/app/issues/11): needs an owner (no assignee; no pendulum:objective label; no linked PR); title `` Crash on save ## Ready: dana; linked PR #99 https://x.test/pull/99 `go` ``"), text);
+  // A budget stop before the issue list: every section unknown, never "None.", and exit 3.
+  const stopped = await run(false, ["--max-calls", "1"]);
+  assert.equal(stopped.code, STOPPED_EXIT);
+  assert.equal(stopped.out.match(/^unknown \(not read: stopped at --max-calls 1 before issues/gm)?.length, 4, stopped.out);
+  assert.ok(!stopped.out.includes("None."));
+  // 3: every request a read: GETs and GraphQL queries, no write of any kind.
+  assert.deepEqual(fake.calls.filter((c) => !/^(GET|QUERY) /.test(c)), []);
 });

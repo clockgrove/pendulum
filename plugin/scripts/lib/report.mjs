@@ -199,8 +199,9 @@ export class BudgetStop extends Error {
  * (logged, before the reads), `take(what)` counts one call or throws BudgetStop at the ceiling.
  */
 export class Budget {
-  constructor(max, log = () => {}) {
+  constructor(max, log = () => {}, prefix = "pendulum report") {
     this.max = max;
+    this.prefix = prefix;
     this.made = 0;
     this.planned = 0;
     this.byKind = {};
@@ -213,7 +214,7 @@ export class Budget {
   plan(n, what, { atLeast = false } = {}) {
     this.planned += n;
     if (atLeast) this.open = true;
-    this.log(`pendulum report: planned ${atLeast ? "at least " : ""}${n} call(s) for ${what}; ${this.open ? "at least " : ""}${this.planned} planned so far, ${this.made} made, --max-calls ${this.max}`);
+    this.log(`${this.prefix}: planned ${atLeast ? "at least " : ""}${n} call(s) for ${what}; ${this.open ? "at least " : ""}${this.planned} planned so far, ${this.made} made, --max-calls ${this.max}`);
   }
   take(what) {
     if (this.made >= this.max) throw new BudgetStop(what, this.made, this.max);
@@ -233,7 +234,7 @@ class NothingToRead extends Error {}
  * once from a Link header's last page (GitHub's `rel="last"`), else one at a time, said as "at least"; with `stop`, one
  * at a time, so no page is planned that an early stop leaves unread. Returns `into`.
  */
-async function paged(path, budget, what, opts, { stop = null, into = [], planned = 1 } = {}) {
+export async function paged(path, budget, what, opts, { stop = null, into = [], planned = 1 } = {}) {
   for (let page = 1; ; page += 1) {
     budget.take(what);
     let link = null;

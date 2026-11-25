@@ -1774,7 +1774,8 @@ export async function harnessVersionChecks({ inputs, workflowHarness: own = work
 
 // ------------------------------------------------------------------ runner
 
-export async function runnerChecks({ inputs, env = process.env }) {
+/** Where the job or loop runs: harness CLI, timeout, gh, node, git, the sandbox; with `srt` (local mode's doctor), srt's floor. */
+export async function runnerChecks({ inputs, env = process.env, srt = false }) {
   const out = [];
   const bin = await onPath(CLI[inputs.harness]?.bin || "");
   out.push(bin ? PASS("harness cli", bin) : FAIL("harness cli", `${CLI[inputs.harness]?.bin} not installed`, `the action installs ${CLI[inputs.harness]?.pkg}; on a laptop: npm install -g ${CLI[inputs.harness]?.pkg}`));
@@ -1796,6 +1797,7 @@ export async function runnerChecks({ inputs, env = process.env }) {
   }
   out.push(nodeCheck());
   out.push(gitCheck(await onPath("git"), await gitVersion()));
+  if (srt) out.push(srtCheck(!!(await onPath("srt")), srtVersion()));
   out.push(...(await claudeSandboxChecks({ inputs, env })));
   return out;
 }
@@ -1822,6 +1824,26 @@ export function gitCheck(present, version) {
   const v = version.join(".");
   if (gitAtLeast(version, MERGE_BASE_GIT)) return PASS("git", v);
   return WARN("git", `git ${v} is older than ${min} and has no \`git merge-tree --merge-base\`: with a decider (the AI Gateway's model, or the stage's harness) every send-back's conflict pass Blocks (with decision_route off its commits are matched), and a review after a rebase reads the whole PR again`, `install git ${min} or later`);
+}
+
+/** The least srt local mode runs on: the release whose protected paths and Linux sandbox lib/local.mjs mirrors. */
+export const SRT_FLOOR = [0, 0, 83];
+
+/** srt's version as [major, minor, patch] from `srt --version`, or null when it cannot be read. */
+export function srtVersion(run = () => spawnSync("srt", ["--version"], { encoding: "utf8", timeout: 30_000 })) {
+  const r = run();
+  const m = r.status === 0 ? /(\d+)\.(\d+)\.(\d+)/.exec(String(r.stdout)) : null;
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+}
+
+/** srt where local mode runs (`version` from srtVersion): FAIL below SRT_FLOOR or unreadable, naming the fix. */
+export function srtCheck(present, version) {
+  const fix = "npm i -g @anthropic-ai/sandbox-runtime@latest";
+  if (!present) return FAIL("srt", "srt not on PATH; Pendulum's own commands run in it", fix);
+  const min = SRT_FLOOR.join(".");
+  if (!version) return FAIL("srt", `present; its version could not be read (srt --version), and local mode needs ${min} or later`, fix);
+  if (gitAtLeast(version, SRT_FLOOR)) return PASS("srt", version.join("."));
+  return FAIL("srt", `srt ${version.join(".")} is older than ${min}, the least local mode runs on`, fix);
 }
 
 /** Per harness with a sandbox on a runner: its name in the checks, and the binaries it needs where the job runs. */
@@ -2567,7 +2589,7 @@ async function main() {
   results.push(...(await objectiveHostChecks({ inputs, repo, token })));
   results.push(...(await sandboxStorageChecks({ inputs, repo, token })));
   results.push(...(await repositoryChecks({ inputs, checkout, runSetup: !!args["run-setup"], local, wf })));
-  results.push(...(await runnerChecks({ inputs })));
+  results.push(...(await runnerChecks({ inputs, srt: local })));
   if (!local) results.push(...(await harnessVersionChecks({ inputs })));
   const fails = results.filter((r) => r.status === "FAIL").length;
   if (args.json) process.stdout.write(`${JSON.stringify({ ready: fails === 0, failures: fails, checks: results }, null, 2)}\n`);

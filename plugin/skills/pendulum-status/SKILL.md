@@ -1,6 +1,6 @@
 ---
 name: pendulum-status
-description: "Show what Pendulum is doing in the current repository, read-only: each open Objective's state and route, and for a Blocked one or a Question the reason and the way on (resume, answer or restart), taken only on the user's yes. Use when the user asks what Pendulum is doing, what is running or queued, why an Objective is Blocked or stuck, or how to answer or resume one. Not for whether the repository is set up (pendulum-doctor) or the scorecard of finished Objectives (pendulum-score)."
+description: "Show what Pendulum is doing in the current repository, read-only: each open Objective's state and route, and for a Blocked one or a Question the reason and the way on (resume, answer or restart), taken only on the user's yes. Use when the user asks what Pendulum is doing, what is running or queued, why an Objective is Blocked or stuck, or how to answer or resume one, or which open issues need an owner or hold up a parent. Not for whether the repository is set up (pendulum-doctor) or the scorecard of finished Objectives (pendulum-score)."
 ---
 
 # /pendulum:pendulum-status [issue]
@@ -15,6 +15,10 @@ Read GitHub and report; change nothing. A way on is one of Pendulum's labels or 
 4. For a Running one, the steps table in Pendulum's progress comment on the issue: its last row, marked **Now**, is the step in progress and for how long; with no **Now** row the stage is between steps, and the rows above say what has run.
 
 Show one line per Objective, oldest first: number, title, state, route, and for Blocked and Question the one-line reason (below). `pendulum wait` (the pendulum-serve skill) waits for the next change instead of asking again.
+
+## Repository triage
+
+For the other open issues, run `pendulum status` ([reference.md](reference.md), Repository triage) and relay it: issues needing an owner with the evidence, assigned ones with linked PRs, each parent's sub-issues with the blocked ones and why. It writes nothing. Never call an issue ready; to hand one to Pendulum, offer pendulum-file's Start a draft.
 
 ## Blocked
 

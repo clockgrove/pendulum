@@ -284,10 +284,10 @@ async function serveThrough401({ refuses, onRefused, stopMs = 5000, answer = nul
     const send = (status, body) => res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
     if (refuses(req.headers.authorization)) return send(401, { message: "Bad credentials" });
     const url = new URL(req.url, "http://x");
+    if (url.pathname === "/repos/o/r/issues" && req.method === "GET") reads += 1;
     // The test's own answer, when it gives one (`answer(req, url)`: [status, body, headers] or null).
     const own = answer?.(req, url);
     if (own) return res.writeHead(own[0], { "content-type": "application/json", ...(own[2] || {}) }).end(JSON.stringify(own[1]));
-    if (url.pathname === "/repos/o/r/issues") reads += 1;
     return send(200, req.method === "POST" ? { message: "Validation Failed" } : url.pathname === "/repos/o/r" ? { full_name: "o/r" } : []);
   });
   await new Promise((ok) => server.listen(0, "127.0.0.1", ok));
@@ -347,6 +347,20 @@ test("serve: a 401 on the local token stops new work and names its source; a ren
   assert.ok(run.lines.some((l) => /a new token in .*: taking work again/.test(l)));
   assert.equal(run.token, "github_pat_new");
   assert.ok(run.reads > 0, "the dispatcher read GitHub again with the new token");
+});
+
+test("#659: serve: a 401 GitHub takes back on the re-check runs the tick's dispatch again, once", async () => {
+  let blockedBy = 0;
+  const answer = (req, url) => {
+    if (url.pathname === "/repos/o/r/issues" && req.method === "GET") return [200, [{ number: 7, state: "open", labels: [{ name: "pendulum:objective" }, { name: "pendulum:local" }] }]];
+    if (url.pathname === "/repos/o/r/issues/7/dependencies/blocked_by") return (blockedBy += 1) === 1 ? [401, { message: "Bad credentials" }] : [200, []];
+    return null;
+  };
+  const run = await serveThrough401({ refuses: () => false, onRefused: () => {}, answer });
+  assert.equal(blockedBy, 2, "the relations were read again, once");
+  assert.ok(run.lines.some((l) => /GitHub refused the local token once \(HTTP 401.*accepted it on the re-check; the tick runs again/.test(l)));
+  assert.ok(!run.lines.some((l) => /dispatch failed|GitHub refused the local token \(HTTP 401/.test(l)));
+  assert.ok(run.lines.some((l) => /tick: starting #7/.test(l)), "the tick completed");
 });
 
 test("#421: serve: a new token whose write check GitHub's rate limit turned away is checked again a minute later, and taken once it passes", async () => {
