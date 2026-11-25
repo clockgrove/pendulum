@@ -3989,8 +3989,11 @@ export class Local {
     let left = box.room;
     let force = running.size === 0;
     const held = [];
+    // Held slots no start was promised (reclaim): a take hands these out before it takes new ones.
+    let unclaimed = 0;
     const take = (n) => {
-      let got = 0;
+      let got = Math.min(n, unclaimed);
+      unclaimed -= got;
       while (got < n && left > 0) {
         const slot = this.slotFor(box, force, { cmd: "serve" });
         if (!slot) {
@@ -4017,9 +4020,15 @@ export class Local {
       );
     };
     const spare = () => {
+      unclaimed = 0;
       for (const slot of held.splice(0)) slot.release();
     };
-    return { take, left: () => left, start, spare };
+    // A dispatch that threw after taking slots (serve's tick, run again on a 401 GitHub took back): its slots, not yet
+    // started, go to the next take, so the dispatch run again has the tick's full room.
+    const reclaim = () => {
+      unclaimed = held.length;
+    };
+    return { take, left: () => left + unclaimed, start, spare, reclaim };
   }
 
   /**
@@ -4182,6 +4191,7 @@ export class Local {
         }
         if (taken && again && !this.stopping) {
           log(`GitHub refused the local token once (HTTP 401: ${e.message.slice(0, 160)}) and accepted it on the re-check; the tick runs again`);
+          slots.reclaim();
           return tick().catch(failed(false));
         }
         log(`dispatch failed: ${e.message.slice(0, 200)}`);

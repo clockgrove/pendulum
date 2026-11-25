@@ -284,8 +284,8 @@ async function serveThrough401({ refuses, onRefused, stopMs = 5000, answer = nul
     const send = (status, body) => res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
     if (refuses(req.headers.authorization)) return send(401, { message: "Bad credentials" });
     const url = new URL(req.url, "http://x");
-    // The test's own answer, when it gives one (`answer(req, url)`: [status, body, headers] or null).
     if (url.pathname === "/repos/o/r/issues" && req.method === "GET") reads += 1;
+    // The test's own answer, when it gives one (`answer(req, url)`: [status, body, headers] or null).
     const own = answer?.(req, url);
     if (own) return res.writeHead(own[0], { "content-type": "application/json", ...(own[2] || {}) }).end(JSON.stringify(own[1]));
     return send(200, req.method === "POST" ? { message: "Validation Failed" } : url.pathname === "/repos/o/r" ? { full_name: "o/r" } : []);
