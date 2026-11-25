@@ -196,7 +196,7 @@ export function harnessPins(spec, workflowHarness) {
  */
 export async function npmPackument(pkg, { fetchFn = fetch, retryMs = 3000 } = {}) {
   const read = async () => {
-    const r = await fetchFn(`https://registry.npmjs.org/${String(pkg).replace("/", "%2f")}`, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(60_000) });
+    const r = await fetchFn(`https://registry.npmjs.org/${String(pkg).replaceAll("/", "%2f")}`, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(60_000) });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     return r.json();
   };
