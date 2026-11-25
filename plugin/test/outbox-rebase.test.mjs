@@ -417,9 +417,14 @@ test("#673: a branch-added file the conflict pass renumbers past main's is check
     writeFileSync(join(t.r.work, "m/index.txt"), `0001_a\n0002_x\n${keep ? "0003_y\n" : ""}`);
     t.go("add", "-A", "m");
     t.go("-c", "core.editor=true", "rebase", "--continue");
-    return t.box.rebaseLeft({ from: t.from, onto: t.onto, judge: fakeJudge({ "m/0002_y.sql": "lost" }).judge });
+    const fake = fakeJudge({ "m/0002_y.sql": "lost" });
+    const left = await t.box.rebaseLeft({ from: t.from, onto: t.onto, judge: fake.judge });
+    return keep ? { left, asked: fake.asked } : left;
   };
-  assert.equal(await pass(true), "");
+  const kept = await pass(true);
+  assert.equal(kept.left, "");
+  // The index renumbered to match is judged knowing the rename.
+  assert.match(kept.asked.find((a) => a.path === "m/index.txt").input, /m\/0002_y\.sql -> m\/0003_y\.sql/);
   assert.match(await pass(false), /: m\/0002_y\.sql \([0-9a-f]{7}\): hunk 1 of 1 \(@@ -0,0 \+1,4 @@\): the decision model \(fake\/model\) judged it lost/);
 });
 
