@@ -3993,8 +3993,11 @@ export class Local {
     let left = box.room;
     let force = running.size === 0;
     const held = [];
+    // Held slots no start was promised (reclaim): a take hands these out before it takes new ones.
+    let unclaimed = 0;
     const take = (n) => {
-      let got = 0;
+      let got = Math.min(n, unclaimed);
+      unclaimed -= got;
       while (got < n && left > 0) {
         const slot = this.slotFor(box, force, { cmd: "serve" });
         if (!slot) {
@@ -4021,9 +4024,15 @@ export class Local {
       );
     };
     const spare = () => {
+      unclaimed = 0;
       for (const slot of held.splice(0)) slot.release();
     };
-    return { take, left: () => left, start, spare };
+    // A dispatch that threw after taking slots (serve's tick, run again on a 401 GitHub took back): its slots, not yet
+    // started, go to the next take, so the dispatch run again has the tick's full room.
+    const reclaim = () => {
+      unclaimed = held.length;
+    };
+    return { take, left: () => left + unclaimed, start, spare, reclaim };
   }
 
   /**
@@ -4172,17 +4181,27 @@ export class Local {
       const marked = [];
       // No Action runs here (actionState): this loop picks the Objectives without pendulum:local too, labelling each first.
       const adopt = (await this.actionState().catch(() => null)) === "none";
-      this.dispatching = dispatch(inputs, { token: this.token, decisionRole: "serve", adopt, notice: this.notice, localSlots: waitLine ? 0 : slots.left(), localTake: slots.take, localFull: waitLine || box.why || "this loop is at PENDULUM_LOCAL_MAX_CONCURRENT", localHeld, localHold: (issue) => this.limitHold(issue.labels, issue.number, issue.updated_at ?? null), localStopped, localLive: (n) => !!liveStage(this.ws(n)), localStopping: () => !!this.stopping, localMarked: (n) => marked.push(n), thirdPartyReads: (this.thirdPartyReads ??= new Map()), readCache: (this.timelines ??= new Map()) }).catch(async (e) => {
-        // A 401 the local token itself gets again (not the notice App's): GitHub no longer takes it. Said once, by source.
-        if (e?.status === 401 && (await rest(`repos/${this.repo.full}`, { token: this.token }).then(() => false, (x) => x?.status === 401))) {
+      const tick = () => dispatch(inputs, { token: this.token, decisionRole: "serve", adopt, notice: this.notice, localSlots: waitLine ? 0 : slots.left(), localTake: slots.take, localFull: waitLine || box.why || "this loop is at PENDULUM_LOCAL_MAX_CONCURRENT", localHeld, localHold: (issue) => this.limitHold(issue.labels, issue.number, issue.updated_at ?? null), localStopped, localLive: (n) => !!liveStage(this.ws(n)), localStopping: () => !!this.stopping, localMarked: (n) => marked.push(n), thirdPartyReads: (this.thirdPartyReads ??= new Map()), readCache: (this.timelines ??= new Map()) });
+      // A 401 on the dispatch: the local token is read again at once. GitHub refusing it again means it no longer takes it
+      // (said once, by source). GitHub taking it means the 401 was GitHub's for a moment (#659): the tick's dispatch runs
+      // again, once; a second 401 is checked the same way and, taken again, fails the tick.
+      const failed = (again) => async (e) => {
+        const taken = e?.status === 401 ? await rest(`repos/${this.repo.full}`, { token: this.token }).then(() => true, (x) => (x?.status === 401 ? false : null)) : null;
+        if (taken === false) {
           refused = this.token;
           probeAt = Date.now() + REFUSED_PROBE.ms;
           log(`GitHub refused the local token (HTTP 401: expired or revoked): no new work starts on this box until it is renewed in ${tokenSource(this.repoFull)}; stages already running end as they can`);
           return { ready: [], refused: true };
         }
+        if (taken && again && !this.stopping) {
+          log(`GitHub refused the local token once (HTTP 401: ${e.message.slice(0, 160)}) and accepted it on the re-check; the tick runs again`);
+          slots.reclaim();
+          return tick().catch(failed(false));
+        }
         log(`dispatch failed: ${e.message.slice(0, 200)}`);
         return { ready: [] };
-      }).then(async (r) => {
+      };
+      this.dispatching = tick().catch(failed(true)).then(async (r) => {
         // The tick's decision calls outside a stage that no record carried: this loop's decisions comment (decision-spend.mjs).
         await flushDecisionSpend(this.repo, this.opts, { role: "serve" });
         // A stop that came while it ran: the picks it marked Running start nothing and go back to Queued, before the exit,
