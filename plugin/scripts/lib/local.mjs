@@ -276,7 +276,7 @@ export function localApp(env = process.env, home = homedir(), harness = null) {
 
 /**
  * The paths srt write-protects in the working directory on its own (its DANGEROUS_FILES and dangerous directories,
- * sandbox-runtime 0.0.81). Where one is absent, srt mounts /dev/null in its place for the command, which a repository
+ * sandbox-runtime 0.0.83). Where one is absent, srt mounts /dev/null in its place for the command, which a repository
  * check that walks the tree cannot open (nodev: EACCES) or reads as a file where it expects a directory. Pendulum
  * makes each absent one before any sandbox opens: an empty directory, or an empty file listed in the clone's
  * .git/info/exclude, so srt protects a real, harmless path and git status stays clean.
@@ -1096,7 +1096,7 @@ export const gitGuards = (clone) => [join(clone, ".git", "hooks"), join(clone, "
  * whole list unfiltered and exits non-zero, so the sandbox binds everything listed, nested .git included; a shortened
  * list never goes out. ripgrep's stderr passes through (srt denies the directories it could not read).
  */
-// srt's names that end a path's search for its protected name (sandbox-runtime 0.0.81 linuxGetMandatoryDenyPaths),
+// srt's names that end a path's search for its protected name (sandbox-runtime 0.0.83 linuxGetMandatoryDenyPaths),
 // matched as it does: by path component, case-folded with toLowerCase.
 const SCAN_DIR_NAMES = [".vscode", ".idea", ".claude/commands", ".claude/agents", ".git/hooks", ".git/config", ".git/HEAD"].map((n) => n.toLowerCase().split("/"));
 /** Whether the scan leaves `line` out: below `root`, a plain path whose first protected name is `.git` below the top. */
@@ -1601,7 +1601,7 @@ export function harnessHomes(harness, env = {}, home = homedir()) {
  * Credential stores unreadable but the harness's own state, writes only in `writable` and that state, the network
  * limited to `domains` and the harness's own API hosts. The harness's own sandbox runs inside it, which needs nested
  * user namespaces and unix sockets. Its read-only paths inside writable ones still hold against code that makes a user
- * namespace of its own: srt's mounts are locked there (checked with srt 0.0.81: umount, remount, bind of the parent and
+ * namespace of its own: srt's mounts are locked there (checked with srt 0.0.83: umount, remount, bind of the parent and
  * hard link all refused; a mount over one only hides it in that namespace).
  */
 /**

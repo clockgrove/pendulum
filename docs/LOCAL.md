@@ -22,7 +22,7 @@ Copilot runs locally only on Linux and WSL2 hosts where its outer sandbox starts
 
 ## Set it up
 
-1. Install `git`, `gh`, Node 22.19 or newer, the harness CLI you use (logged in), and `srt`: `npm i -g @anthropic-ai/sandbox-runtime`.
+1. Install `git`, `gh`, Node 22.19 or newer, the harness CLI you use (logged in), and `srt` 0.0.83 or newer: `npm i -g @anthropic-ai/sandbox-runtime@latest`.
    Add the platform packages above, for example `sudo apt-get install -y bubblewrap socat ripgrep`.
 
    On Ubuntu 24.04 and later, AppArmor keeps srt's and Claude Code's sandboxes from starting; local mode names what it finds before it runs anything.
@@ -542,7 +542,7 @@ How a change applies:
 - It fetches the ref from `github.com/clockgrove/pendulum` only, with none of your git config, `GIT_*` variables or `.netrc`, into a new directory under `~/.cache/pendulum/releases` (no sandbox may write there; the newest three are kept, and any one a live `serve` on this machine runs).
 - Right after the fetch it checks the checkout with git (HEAD is the fetched commit; no tracked file is flagged to hide a change, changed or added, ignored files included; a tag's `plugin.json` names that release) and records a SHA-256 of every file in it, its `.git` included, in its own memory.
 - Right before it runs the checkout it hashes every file again, without git, and runs it only if every file, and no other, matches.
-- Then, once no stage runs here, it starts again on it in the same process (Node 22.15 or newer), which takes up the Objectives it held paused at once, as after any restart.
+- Then, once no stage runs here, it starts again on it in the same process, which takes up the Objectives it held paused at once, as after any restart.
   Stages in flight are never interrupted; one that would start waits for the switch.
 
 **What it does not follow.**
