@@ -163,12 +163,103 @@ export function chosenInputs({ args = {}, env = process.env, choice = {}, gatewa
   return { ok: true, inputs: Object.fromEntries(CHOSEN_FIELDS.map((k) => [k, r[k]])) };
 }
 
+const EXACT_VERSION = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
+const STABLE_VERSION = /^(\d+)\.(\d+)\.(\d+)$/;
+const DAY_MS = 86_400_000;
+const daysText = (n) => `${n} day${n === 1 ? "" : "s"}`;
+const PIN_FIX = (h = "<harness>") => `Pin a version: set harness_version (PENDULUM_HARNESS_VERSION) in .github/workflows/pendulum.yml to ${h}=<version>, an exact version from npm, and merge it; then resume through Draft.`;
+
 /**
- * The harness CLI version to install: the repository's pin (`harness_version`) for the harness it was set for, the one
- * the workflow's env block names (`defaultHarness`, inputs.mjs workflowHarness); `latest` for another one, chosen by an
- * Objective's harness label, a run's override or a repository variable.
+ * The harness CLI pins `harness_version` sets (the reviewed workflow file only, inputs.mjs WORKFLOW_ONLY_SETTINGS):
+ * `claude=2.1.331,codex=0.172.0` (comma or space separated) pins each harness it names; one value pins the harness the
+ * workflow's env block names (`workflowHarness`, inputs.mjs workflowHarness). A value is an exact npm version or
+ * `latest`, which pins nothing. {ok, pins: {harness: version}}, or {ok: false, reason, fix} for any other value.
  */
-export const harnessVersionFor = (harness, defaultHarness, version) => (harness === defaultHarness && version ? version : "latest");
+export function harnessPins(spec, workflowHarness) {
+  const s = String(spec ?? "").trim();
+  const entries = s.includes("=") ? s.split(/[\s,]+/).filter(Boolean).map((e) => e.split("=")) : s ? [[workflowHarness, s]] : [];
+  const pins = {};
+  for (const [h, v, ...rest] of entries) {
+    const name = String(h ?? "").trim().toLowerCase();
+    const value = String(v ?? "").trim();
+    if (rest.length || !HARNESSES.includes(name) || name in pins || !(value === "latest" || EXACT_VERSION.test(value))) {
+      return { ok: false, reason: `harness_version ${tick(s)} is not a harness CLI version Pendulum installs: each entry is ${tick("<harness>=<version>")} (claude, codex or copilot, once each), or one value for the workflow's harness, and each version an exact one (${tick("2.1.331")}) or ${tick("latest")}`, fix: PIN_FIX() };
+    }
+    if (value !== "latest") pins[name] = value;
+  }
+  return { ok: true, pins };
+}
+
+/**
+ * The npm registry's document for `pkg` (its `time` map, `versions` and `dist-tags`), read once more after `retryMs` when
+ * the first read fails, so one blip does not Block a stage; throws when neither read answers.
+ */
+export async function npmPackument(pkg, { fetchFn = fetch, retryMs = 3000 } = {}) {
+  const read = async () => {
+    const r = await fetchFn(`https://registry.npmjs.org/${String(pkg).replaceAll("/", "%2f")}`, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(60_000) });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return r.json();
+  };
+  try {
+    return await read();
+  } catch {
+    await new Promise((done) => setTimeout(done, retryMs));
+    return read();
+  }
+}
+
+const newer = (a, b) => {
+  for (let i = 1; i <= 3; i++) if (Number(a[i]) !== Number(b[i])) return Number(a[i]) > Number(b[i]);
+  return false;
+};
+
+/**
+ * The exact version of `harness`'s CLI (npm package `pkg`) to install, and why: its pin in `spec` (harnessPins), else
+ * the newest release published at least `minAgeDays` before `now`, by the registry's `time` map (`registry`,
+ * npmPackument): a stable version still published and not deprecated, no newer than the `latest` dist-tag. Fails
+ * closed: {problem: {reason, fix}} when the spec is not one Pendulum takes, the registry cannot be read or names no such
+ * release, and never the newest release in its place. Else {version, why}.
+ */
+export async function resolveHarnessVersion({ harness, pkg, spec, workflowHarness, minAgeDays, now = Date.now(), registry = npmPackument }) {
+  const p = harnessPins(spec, workflowHarness);
+  if (!p.ok) return { problem: { reason: p.reason, fix: p.fix } };
+  if (p.pins[harness]) return { version: p.pins[harness], why: "pinned by harness_version" };
+  const unread = (what) => ({ problem: { reason: `${harness}'s CLI version could not be chosen: ${what}, and Pendulum never installs a release younger than ${daysText(minAgeDays)} (harness_min_age_days)`, fix: `${PIN_FIX(harness)} Or resume once the npm registry answers.` } });
+  let doc;
+  try {
+    doc = await registry(pkg);
+  } catch (e) {
+    return unread(`the npm registry could not be read for ${pkg} (${String(e?.message || e).slice(0, 120)})`);
+  }
+  const time = doc?.time;
+  const latest = STABLE_VERSION.exec(String(doc?.["dist-tags"]?.latest ?? ""));
+  if (!time || typeof time !== "object" || !latest || !doc.versions || typeof doc.versions !== "object") return unread(`the npm registry's document for ${pkg} has no release times`);
+  const cutoff = now - minAgeDays * DAY_MS;
+  let best = null;
+  for (const [v, at] of Object.entries(time)) {
+    const m = STABLE_VERSION.exec(v);
+    const t = Date.parse(at);
+    if (!m || !(t <= cutoff) || !doc.versions[v] || doc.versions[v].deprecated || newer(m, latest)) continue;
+    if (!best || newer(m, best.m)) best = { m, v, at: new Date(t).toISOString() };
+  }
+  if (!best) return unread(`${pkg} has no release at least ${daysText(minAgeDays)} old`);
+  return { version: best.v, why: `the newest release at least ${daysText(minAgeDays)} old (published ${best.at.slice(0, 10)}${best.v === latest[0] ? "" : `; latest is ${latest[0]}`})` };
+}
+
+/**
+ * Why the Action's install step chose no harness CLI version (PENDULUM_STAGE_VERSION_PROBLEM, its `version_problem`
+ * output: resolveHarnessVersion's {reason, fix}), so none is installed and the stage Blocks; null when it chose one.
+ */
+export function versionProblem(raw) {
+  if (!String(raw ?? "").trim()) return null;
+  try {
+    const p = JSON.parse(raw);
+    if (typeof p?.reason === "string" && p.reason) return { reason: p.reason, fix: typeof p.fix === "string" && p.fix ? p.fix : PIN_FIX() };
+  } catch {
+    // Not the step's JSON: Blocked all the same, as no version was installed.
+  }
+  return { reason: "the install step chose no harness CLI version", fix: PIN_FIX() };
+}
 
 /**
  * Why a stage cannot run on `harness` where its route prepared another (`prepared`: PENDULUM_STAGE_HARNESS, the harness the

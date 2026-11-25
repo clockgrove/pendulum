@@ -141,7 +141,10 @@ inputs:
     description: How long, in minutes, the work stage waits for the cross-OS legs on one head, from its first wait there (a rerun included), before it Blocks; 60 when empty, at most 1440 (24 hours), and a larger value reads as 60. The stage's own wall clock bounds it too. Set in the workflow file only.
     required: false
   harness_version:
-    description: The npm version of the harness CLI to install on the runner; `latest` by default. It pins the harness the workflow's env block names (PENDULUM_HARNESS) only; another harness, chosen by an Objective's label, a run's override or a repository variable, installs its latest.
+    description: 'The harness CLI versions to install, per harness: `claude=2.1.331,codex=0.172.0` pins each harness it names, and one value (`2.1.331`) pins the harness the workflow''s env block names (PENDULUM_HARNESS). Each version is exact, or `latest`. A harness with no pin, the workflow''s or one an Objective''s label, a run''s override or a repository variable chooses, installs `latest`: the newest release at least `harness_min_age_days` old, read from the npm registry; when the registry cannot be read, the stage Blocks naming the fix (pin a version), never installing the newest release. The job log and doctor name the version each harness resolved to, and why. Set in the workflow file only.'
+    required: false
+  harness_min_age_days:
+    description: How old, in days, a harness CLI release must be before `latest` installs it (a whole number from 1 to 30; 3 when empty, and any other value reads as 3), by the npm registry's publish time. Set in the workflow file only.
     required: false
   allowed_domains:
     description: Hosts the harness's sandboxed commands (Claude Code, Codex or Copilot) may reach on Actions and in a cloud sandbox, beyond GitHub and the npm and Yarn registries (comma or space separated; `*.example.com` covers its subdomains), for every Objective; one Objective's own host goes in its `pendulum:host:<host>` label. The Actions and cloud sandbox counterpart of local mode's PENDULUM_LOCAL_DOMAINS.
@@ -389,12 +392,13 @@ runs:
       # The harness comes from the Objective's harness label when it names one, else `with:` when given, else the
       # repository's PENDULUM_HARNESS variable, else the workflow's PENDULUM_HARNESS env block (visible to composite steps at
       # runtime), else claude: the same precedence as lib/choice.mjs chosenInputs over lib/inputs.mjs. Its version:
-      # lib/choice.mjs harnessVersionFor.
+      # lib/choice.mjs resolveHarnessVersion.
       env:
         PENDULUM_CHOSEN_HARNESS: ${{ steps.choice.outputs.harness }}
         PENDULUM_INPUT_HARNESS: ${{ inputs.harness }}
         PENDULUM_VARIABLE_HARNESS: ${{ fromJSON(inputs.vars || '{}').PENDULUM_HARNESS }}
         PENDULUM_INPUT_HARNESS_VERSION: ${{ inputs.harness_version }}
+        PENDULUM_INPUT_HARNESS_MIN_AGE_DAYS: ${{ inputs.harness_min_age_days }}
       run: |
         # A harness name as lib/inputs.mjs reads it: the outer whitespace trimmed, lower case. A variable's is taken only
         # when it names a harness, as inputs.mjs takes it (valueProblem); anything else falls through to the workflow's.
@@ -404,9 +408,16 @@ runs:
         case "$VARIABLE_HARNESS" in claude|codex|copilot) ;; *) VARIABLE_HARNESS="" ;; esac
         DEFAULT_HARNESS="$(name "${PENDULUM_INPUT_HARNESS:-${VARIABLE_HARNESS:-$WORKFLOW_HARNESS}}")"
         HARNESS="$(name "${PENDULUM_CHOSEN_HARNESS:-$DEFAULT_HARNESS}")"
-        VERSION="${PENDULUM_INPUT_HARNESS_VERSION:-${PENDULUM_HARNESS_VERSION:-latest}}"
-        # harness_version pins the workflow env block's harness only: another one (an Objective's label's, a run's override's, a repository variable's) installs its latest.
-        if [ "$HARNESS" != "$WORKFLOW_HARNESS" ]; then VERSION=latest; fi
+        # The exact version (lib/choice.mjs resolveHarnessVersion): the harness's pin, else the newest release at least
+        # harness_min_age_days old. Anything but one exact version (none when the registry cannot be read): nothing is
+        # installed, and the stage Blocks on the step's version_problem output before any harness runs, the script's own
+        # reason when it wrote one.
+        VERSION="$(node "$GITHUB_ACTION_PATH/plugin/scripts/objective-harness.mjs" --resolve "$HARNESS" --workflow-harness "$WORKFLOW_HARNESS")"
+        echo "harness=$HARNESS" >> "$GITHUB_OUTPUT"
+        if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
+          grep -q '^version_problem=' "$GITHUB_OUTPUT" || echo 'version_problem={"reason":"the install step chose no exact harness CLI version"}' >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
         # Claude Code's postinstall puts its native binary in place (without it `claude` is a stub that exits 1); npm 11
         # asks for each package's scripts to be allowed by name, and this allows that one package's only.
         case "$HARNESS" in
@@ -442,7 +453,6 @@ runs:
           fi
         fi
         "$HARNESS" --version
-        echo "harness=$HARNESS" >> "$GITHUB_OUTPUT"
 
     # The sandbox modes alone load a vendor SDK (lib/adapters): installed from plugin/package-lock.json, exactly as
     # pinned, with no package's install scripts run. The launcher starts the same install itself (launch.mjs
@@ -527,6 +537,8 @@ runs:
         PENDULUM_INPUT_IMAGE_REFRESH: ${{ inputs.image_refresh }}
         PENDULUM_INPUT_IMAGE_DAILY_MINUTES: ${{ inputs.image_daily_minutes }}
         PENDULUM_INPUT_IMAGE_MAX_AGE_DAYS: ${{ inputs.image_max_age_days }}
+        PENDULUM_INPUT_HARNESS_VERSION: ${{ inputs.harness_version }}
+        PENDULUM_INPUT_HARNESS_MIN_AGE_DAYS: ${{ inputs.harness_min_age_days }}
         PENDULUM_INPUT_IMAGE_OWED: ${{ inputs.image_owed }}
         PENDULUM_INPUT_SANDBOX_IDLE_DAYS: ${{ inputs.sandbox_idle_days }}
         PENDULUM_INPUT_SWEEP_MAX_DESTROYS: ${{ inputs.sweep_max_destroys }}
@@ -540,6 +552,8 @@ runs:
         PENDULUM_INPUT_QUEUE_STALL_MINUTES: ${{ inputs.queue_stall_minutes }}
         # The harness the install step put in place (empty for the modes that install none): a stage that would run another Blocks.
         PENDULUM_STAGE_HARNESS: ${{ steps.install.outputs.harness }}
+        # Why the install step chose no version for it ({reason, fix}): the stage Blocks with it before any harness runs.
+        PENDULUM_STAGE_VERSION_PROBLEM: ${{ steps.install.outputs.version_problem }}
         # The account the job's account step picked (#267), whose credential alone the workflow passed: a stage whose labels pick another Blocks.
         PENDULUM_STAGE_ACCOUNT: ${{ inputs.account }}
         # The accounts setup rendered the credential inputs for (account mode): another declaration picks no account.

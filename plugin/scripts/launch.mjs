@@ -44,7 +44,7 @@ import { flushDecisionSpend } from "./lib/decision-spend.mjs";
 import { objectiveInputs, routeAccountCheck } from "./lib/objective-trust.mjs";
 import { chatgptLogin, routeInputs, routeSecretSuffix } from "./lib/accounts.mjs";
 import { waitOnAccounts } from "./lib/account-wait.mjs";
-import { CHOSEN_FIELDS, harnessVersionFor, stageAccountName } from "./lib/choice.mjs";
+import { CHOSEN_FIELDS, resolveHarnessVersion, stageAccountName } from "./lib/choice.mjs";
 import { READ_PERMISSIONS } from "./lib/token-keeper.mjs";
 import { backend } from "./lib/backend.mjs";
 import { unknownOf } from "./lib/usage.mjs";
@@ -395,7 +395,8 @@ const PROBE = 'echo "$HOME"; [ "$(cat "$HOME/pendulum/plugin/.pendulum-digest" 2
 /**
  * Runs in the sandbox as its default user: the plugin unpacked when one was uploaded, the harness CLI installed system
  * wide (the agent runs it) when absent or not the version asked, then the stage started detached, the VM's clock
- * printed just before it. Arguments: claim, tarball or "", digest, CLI binary, npm package, version.
+ * printed just before it. Arguments: claim, tarball or "", digest, CLI binary, npm package, exact version (the launcher's
+ * choice.mjs resolveHarnessVersion).
  * Only the stage gets the start command's environment (its tokens and the harness's credential). The package steps (apt,
  * npm and the install scripts they run) and the CLI's version check run with none of it, only HOME and PATH: the
  * image's sudo keeps the caller's environment (`!env_reset`), so sudo alone would pass it on.
@@ -427,9 +428,11 @@ export const START = [
   "  bare sudo -n unshare --net ip6tables-nft -t filter -N pendulum-probe >/dev/null 2>&1 || bare sudo -n update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy >&2 || true",
   '  case "$(bare ip6tables --version 2>/dev/null || true)" in *legacy*) bare sudo -n touch /run/xtables.lock >&2 || true ;; esac',
   "fi",
-  'want="$6"; if [ "$want" = latest ]; then want="$(bare npm view "$5" version 2>/dev/null || true)"; fi',
+  'want="$6"; [ -n "$want" ] || { echo "no harness CLI version was chosen" >&2; exit 1; }',
   'have="$(bare /usr/local/bin/"$4" --version 2>/dev/null | head -1 || true)"',
-  'if [ -z "$have" ] || { [ -n "$want" ] && [ "${have#*"$want"}" = "$have" ]; }; then bare sudo -n sh -c \'umask 022; exec npm install -g --prefix /usr/local --no-audit --no-fund --loglevel=error "$1"\' sh "$5@$6" >&2; fi',
+  // The installed one counts only when a word of its `--version` line is exactly the version asked (`codex-cli 0.172.0`,
+  // `2.1.331 (Claude Code)`, a trailing period dropped): 2.1.33 is not 2.1.331.
+  'if [ -z "$have" ] || ! printf "%s\\n" $have | sed "s/[.,]$//" | grep -qxF -- "$want"; then bare sudo -n sh -c \'umask 022; exec npm install -g --prefix /usr/local --no-audit --no-fund --loglevel=error "$1"\' sh "$5@$6" >&2; fi',
   // Everything the stage writes is its user's alone: the logs, the usage, the tokens' socket.
   "umask 077",
   // The stage's start time, the launcher's and the stage's alike (its record writes carry it).
@@ -562,7 +565,7 @@ export async function startInSandbox({ adapter, repo, repoId, issue, recordedId,
     // with the lease, so whichever of its write and the launcher's lands last, they are there.
     const handed = { id, home, meter, image: from ?? null, sessionEnd, ...(handoff ? { progress: handoff.progress, launch: { ...handoff.launch, found } } : {}) };
     const budget = { ...(maxUsd > 0 ? { PENDULUM_MAX_USD: String(harnessUsd) } : {}), PENDULUM_STAGE_RECORD: JSON.stringify(handed) };
-    const lines = await sh(["bash", "-c", START, "pendulum-stage-start", claim, tarball, plugin.digest, CLI[harness].bin, CLI[harness].pkg, harnessVersion || "latest"], { env: { ...env, ...imageEnv, ...budget, ...sessionCapEnv({ vendor: adapter.name, setting: env.PENDULUM_TIMEOUT_MINUTES, minutes }), PENDULUM_TIMEOUT_MINUTES: String(minutes), PENDULUM_STAGE_SESSION_END: sessionEnd } });
+    const lines = await sh(["bash", "-c", START, "pendulum-stage-start", claim, tarball, plugin.digest, CLI[harness].bin, CLI[harness].pkg, harnessVersion ?? ""], { env: { ...env, ...imageEnv, ...budget, ...sessionCapEnv({ vendor: adapter.name, setting: env.PENDULUM_TIMEOUT_MINUTES, minutes }), PENDULUM_TIMEOUT_MINUTES: String(minutes), PENDULUM_STAGE_SESSION_END: sessionEnd } });
     watch.mark("command");
     const vmMs = Number(lines.at(-1));
     const commandAt = Number.isFinite(vmMs) && vmMs > 1e12 ? new Date(vmMs).toISOString() : new Date().toISOString();
@@ -1120,6 +1123,9 @@ async function startLocked(run, ctx, { stage, pr: wanted, cue }) {
   // check has passed.
   const quiet = (p) => (p.catch(() => {}), p);
   const ciToken = quiet(workflowTokenChecks({ repo, token: inputs.githubToken || tokens.write }));
+  // The harness CLI's exact version (choice.mjs resolveHarnessVersion): its pin, else the newest release at least
+  // harness_min_age_days old; none (the registry unreadable) Blocks as doctor's row, before any sandbox call.
+  const pinned = resolveHarnessVersion({ harness: inputs.harness, pkg: CLI[inputs.harness].pkg, spec: inputs.harnessVersion, workflowHarness: workflowHarness(), minAgeDays: inputs.harnessMinAgeDays });
   const image = currentImage(adapter, repo, { repoId, token: tokens.write }).catch((e) => {
     log(`the sandbox image record could not be read (${e.status || "error"}); starting from the base image`);
     return null;
@@ -1146,13 +1152,15 @@ async function startLocked(run, ctx, { stage, pr: wanted, cue }) {
     const listing = quiet(adapter.list({ tag: ["pendulum-issue", String(n)] }));
     const env = stageEnvironment({ inputs, defaults: run.defaults, stage, issue: n, pr, claim, tokens, appSlug: tokens.app?.appSlug, runId, transcriptKey: run.seal?.key });
     const plugin = pluginPackage();
-    const failed = (await ciToken).filter((c) => c.status === "FAIL");
+    const version = await pinned;
+    const failed = [...(await ciToken).filter((c) => c.status === "FAIL"), ...(version.problem ? [{ name: "harness version", status: "FAIL", detail: version.problem.reason, fix: version.problem.fix }] : [])];
+    if (version.version) log(`#${n}: harness ${inputs.harness}: ${CLI[inputs.harness].pkg}@${version.version}, ${version.why}`);
     watch.mark("doctor");
     if (failed.length) throw Object.assign(new Error(`doctor: ${failed.map((c) => c.name).join(", ")}`), { code: "doctor", rows: failed });
     // Stopped since the earlier stage's end when the record says it stopped then; its storage is this stage's to book.
     const stoppedAt = prior?.state === "stopped" && !prior.stopError ? (prior.stoppedAt ?? null) : null;
     const handoff = { progress: stageProgressKey(runId, claim), launch: startEntry({ stage, event: eventName, eventAt: ctx.eventAt, run: runId, cue }) };
-    result = await startInSandbox({ adapter, repo, repoId, issue: n, recordedId: prior?.id ?? null, recordedImage: prior?.image ?? null, image, baseImage: adapter.baseImage(inputs.nodeVersion), claim, env, budgetMs, vcpus, harness: inputs.harness, harnessVersion: harnessVersionFor(inputs.harness, workflowHarness(), inputs.harnessVersion), plugin, maxUsd: inputs.maxUsd, stoppedAt, listing, settled: run.settled ?? null, handoff, watch });
+    result = await startInSandbox({ adapter, repo, repoId, issue: n, recordedId: prior?.id ?? null, recordedImage: prior?.image ?? null, image, baseImage: adapter.baseImage(inputs.nodeVersion), claim, env, budgetMs, vcpus, harness: inputs.harness, harnessVersion: version.version, plugin, maxUsd: inputs.maxUsd, stoppedAt, listing, settled: run.settled ?? null, handoff, watch });
   } catch (e) {
     // The log gets the whole message; GitHub gets the error's code and HTTP status only.
     log(`#${n}: the stage did not start: ${String(e.message).slice(0, 800)}`);

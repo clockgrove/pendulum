@@ -37,6 +37,13 @@ export const PENDULUM_VERSION = JSON.parse(readFileSync(new URL("../../.claude-p
  */
 export const IMAGE_MAX_AGE_DAYS = 7;
 export const IMAGE_MAX_AGE_MAX = 30;
+/**
+ * harness_min_age_days (choice.mjs resolveHarnessVersion): how old a harness CLI release must be before `latest` picks it,
+ * its default and most. The reviewed workflow file alone sets it (WORKFLOW_ONLY_SETTINGS); another value reads as the default.
+ */
+export const HARNESS_MIN_AGE_DAYS = 3;
+export const HARNESS_MIN_AGE_MAX = 30;
+export const harnessMinAgeDays = (v) => (/^\s*\d+\s*$/.test(String(v ?? "")) && Number(v) >= 1 && Number(v) <= HARNESS_MIN_AGE_MAX ? Number(v) : HARNESS_MIN_AGE_DAYS);
 
 export const DEFAULTS = {
   harness: "claude",
@@ -75,7 +82,8 @@ export const DEFAULTS = {
   cross_os_workflow: "", // the repository's CI workflow file the work stage runs on the branch for its macOS and Windows legs (lib/cross-os.mjs); empty: off
   cross_os_checks: "", // the check names of those legs, one per line; empty: off
   cross_os_wait_minutes: "60", // how long the work stage waits for those legs on a head (lib/cross-os.mjs)
-  harness_version: "latest",
+  harness_version: "latest", // choice.mjs harnessPins: one exact version for the workflow's harness, or `claude=<version>,codex=<version>`
+  harness_min_age_days: String(HARNESS_MIN_AGE_DAYS), // choice.mjs resolveHarnessVersion: `latest` is the newest release at least this old
   allowed_domains: "", // The harness's sandbox (Claude Code, Codex, Copilot) on Actions and in a cloud sandbox: hosts its commands may reach beyond GitHub and the npm and Yarn registries (local.mjs runnerDomains)
   node_version: "24",
   project: "", // the Pendulum board's node id, recorded by setup (github.mjs findProject); empty: the board titled exactly "Pendulum: <repo>"
@@ -220,7 +228,7 @@ export function workflowSettings(wf = {}) {
  */
 export const WORKFLOW_ONLY_SETTINGS = new Set(
   [
-    ...["CREDENTIAL", "AUTO_MERGE", "NOTIFY", "MAINTAINERS", "PROTECTED_PATHS", "ALLOWED_DOMAINS", "LOCAL_DOMAINS", "WORKER_SECRETS", "LOCAL_ENV", "SANDBOX", "HARNESS_VERSION", "SETUP", "INSTALL", "BUDGET_COMMAND", "REGENERATE", "LOCAL_SETUP", "LOCAL_DB"],
+    ...["CREDENTIAL", "AUTO_MERGE", "NOTIFY", "MAINTAINERS", "PROTECTED_PATHS", "ALLOWED_DOMAINS", "LOCAL_DOMAINS", "WORKER_SECRETS", "LOCAL_ENV", "SANDBOX", "HARNESS_VERSION", "HARNESS_MIN_AGE_DAYS", "SETUP", "INSTALL", "BUDGET_COMMAND", "REGENERATE", "LOCAL_SETUP", "LOCAL_DB"],
     ...["THIRD_PARTY_REVIEWERS", "THIRD_PARTY_WAIT_MINUTES", "CI_CHECKS", "PG_BIN", "NODE_VERSION", "PROJECT"],
     ...["CROSS_OS_WORKFLOW", "CROSS_OS_CHECKS", "CROSS_OS_WAIT_MINUTES"],
     ...["APP_ID", "ANTHROPIC_OIDC_EXCHANGE_URL", "VERCEL_TEAM_ID", "VERCEL_PROJECT_ID", "IMAGE_OWED"],
@@ -573,7 +581,7 @@ export const GITHUB_TOKEN_KEYS = ["GITHUB_TOKEN", "GH_TOKEN", "GH_ENTERPRISE_TOK
  * given to (from process.env), never by a child, so scrubbedEnv (harness.mjs) removes them from every child, and a local
  * stage's base env never takes one from PENDULUM_LOCAL_ENV (lib/local.mjs localBaseEnv).
  */
-export const PENDULUM_CONTROL_KEYS = ["PENDULUM_STAGE", "PENDULUM_STAGE_ISSUE", "PENDULUM_STAGE_CLAIM", "PENDULUM_STAGE_CROSS_OS", "PENDULUM_STAGE_PR", "PENDULUM_STAGE_RECORD", "PENDULUM_STAGE_COMMAND_MS", "PENDULUM_STAGE_SESSION_END", "PENDULUM_STAGE_SESSION_CAP", "PENDULUM_STAGE_HARNESS", "PENDULUM_STAGE_HOSTS", "PENDULUM_STAGE_ACCOUNT", "PENDULUM_STAGE_AUTO_ACCOUNT", "PENDULUM_ACCOUNTS", "PENDULUM_RENDERED_ACCOUNTS", "PENDULUM_AUTO_ACCOUNT", "PENDULUM_APP_SLUG", "PENDULUM_PROGRESS_RUN", "PENDULUM_READ_TOKEN", "PENDULUM_IMAGE_CHECKOUT", "PENDULUM_IMAGE_ENV_FILE", "PENDULUM_ADAPTER_INSTALL", "PENDULUM_SANDBOX_VCPUS", "PENDULUM_LOCAL_FIRST_SETUP_MS", "PENDULUM_LOCAL_APP_ID", "PENDULUM_LOCAL_APP_KEY", "PENDULUM_NOTICE_APP_ID", "PENDULUM_LOCAL_AUTO_ACCOUNT", "PENDULUM_GATEWAY_URL", "PENDULUM_STATE_DIR", "PENDULUM_RELAY_SOCKET_DIR", "PENDULUM_SERVE_SWITCHED_AT", "PENDULUM_SERVE_SWITCHED_FROM", "PENDULUM_TEST_GITHUB_WEB", "PENDULUM_SEAL_KEY", "PENDULUM_ACTION_REF", "PENDULUM_STAGE_BUILD"];
+export const PENDULUM_CONTROL_KEYS = ["PENDULUM_STAGE", "PENDULUM_STAGE_ISSUE", "PENDULUM_STAGE_CLAIM", "PENDULUM_STAGE_CROSS_OS", "PENDULUM_STAGE_PR", "PENDULUM_STAGE_RECORD", "PENDULUM_STAGE_COMMAND_MS", "PENDULUM_STAGE_SESSION_END", "PENDULUM_STAGE_SESSION_CAP", "PENDULUM_STAGE_HARNESS", "PENDULUM_STAGE_VERSION_PROBLEM", "PENDULUM_STAGE_HOSTS", "PENDULUM_STAGE_ACCOUNT", "PENDULUM_STAGE_AUTO_ACCOUNT", "PENDULUM_ACCOUNTS", "PENDULUM_RENDERED_ACCOUNTS", "PENDULUM_AUTO_ACCOUNT", "PENDULUM_APP_SLUG", "PENDULUM_PROGRESS_RUN", "PENDULUM_READ_TOKEN", "PENDULUM_IMAGE_CHECKOUT", "PENDULUM_IMAGE_ENV_FILE", "PENDULUM_ADAPTER_INSTALL", "PENDULUM_SANDBOX_VCPUS", "PENDULUM_LOCAL_FIRST_SETUP_MS", "PENDULUM_LOCAL_APP_ID", "PENDULUM_LOCAL_APP_KEY", "PENDULUM_NOTICE_APP_ID", "PENDULUM_LOCAL_AUTO_ACCOUNT", "PENDULUM_GATEWAY_URL", "PENDULUM_STATE_DIR", "PENDULUM_RELAY_SOCKET_DIR", "PENDULUM_SERVE_SWITCHED_AT", "PENDULUM_SERVE_SWITCHED_FROM", "PENDULUM_TEST_GITHUB_WEB", "PENDULUM_SEAL_KEY", "PENDULUM_ACTION_REF", "PENDULUM_STAGE_BUILD"];
 
 export const isPendulumSecret = (k) => PENDULUM_SECRET_KEYS.some((n) => k === n || k === `PENDULUM_${n}` || k === `PENDULUM_INPUT_${n}`);
 
@@ -728,6 +736,7 @@ export function resolveInputs({ args = {}, env = process.env } = {}) {
     crossOsChecks: String(get("cross_os_checks") || "").split(/\r?\n/).map((s) => s.trim()).filter(Boolean),
     crossOsWaitMs: ((m) => (m <= CROSS_OS_WAIT_MAX_MINUTES ? m : 60))(above0(get("cross_os_wait_minutes"), 60)) * 60_000,
     harnessVersion: get("harness_version"),
+    harnessMinAgeDays: harnessMinAgeDays(get("harness_min_age_days")),
     objectiveLabel: get("objective_label"),
     mode: get("mode"),
     issue: get("issue") ? Number(get("issue")) : null,
@@ -985,7 +994,6 @@ export function harnessName(v) {
 }
 /**
  * The harness the workflow's own env block names (PENDULUM_HARNESS as written there, before any repository variable): the
- * one its `harness_version` pin is for (choice.mjs harnessVersionFor). Any other, a variable's, a run's or a label's,
- * installs its latest.
+ * one a single-value `harness_version` pins (choice.mjs harnessPins).
  */
 export const workflowHarness = (env = process.env) => (APPLIED ? APPLIED.workflowHarness : harnessName(env.PENDULUM_HARNESS));
