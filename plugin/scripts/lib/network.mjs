@@ -288,8 +288,12 @@ export function stopWaiting() {
   for (const ep of EPISODES.values()) ep.stop.abort();
 }
 
+/** Whether this process gave up waiting for srt (harness.mjs srtBack): a later miss fails at once while srt is not back. */
+export const SRT_WAIT = { givenUp: false };
+
 /** Tests: back to a process that does not wait. */
 export function resetNetwork() {
+  SRT_WAIT.givenUp = false;
   stopWaiting();
   MODE = null;
   STOPPED = false;

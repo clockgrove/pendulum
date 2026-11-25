@@ -19,12 +19,12 @@ import { homedir } from "node:os";
 import { dropOwned, privateTmp } from "./lib/fsafe.mjs";
 import { join, resolve } from "node:path";
 import { AGENT_DIRS, PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, installTools, openRegeneration, runnerFileEnv, runSetup } from "./lib/checkout.mjs";
-import { LIMIT, USAGE_LIMIT, UsageLimitReached, credentialEnv, gatewaySession, harnessVersion, runHarness, carveDriftReserve, passMaxUsd, scrubbedEnv, stageLimits } from "./lib/harness.mjs";
+import { LIMIT, USAGE_LIMIT, UsageLimitReached, credentialEnv, gatewaySession, harnessVersion, runHarness, carveDriftReserve, passMaxUsd, scrubbedEnv, srtBack, stageLimits } from "./lib/harness.mjs";
 import { addLabels, requiredChecks, closingIssues, getIssue, getRepo, hasMergeQueue, getPr, listComments, listReviews, markReady, postReview, prBodyHistory, prDiff, primeWriters, removeLabel, repoOf, resolvePendulumThreads, rest, runningSince, transientError } from "./lib/github.mjs";
 import { commandFailed, eventAction, eventSender, log, mask, parseArgs, postedError, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { refusalFields, unpricedCodex, usageLimited } from "./lib/usage.mjs";
 import { PLACEHOLDER_MARKER, REVIEW_LABEL, acceptanceEntries, capReached, copilotCount, costByPhase, decideExit, decisionsRead, decisionsSection, decisionsShown, diffLines, marker, parseFindings, parseReview, promptDiff, protectedPaths, protectedTouched, refusalCause, refusalReason, sessionCapNote, setupPaths, snapComments, sumSpend, toolchainFile, trustedAuthor } from "./lib/logic.mjs";
-import { agentUser } from "./lib/proc.mjs";
+import { SRT_GONE, agentUser } from "./lib/proc.mjs";
 import { backend, spendInProgress } from "./lib/backend.mjs";
 import { openStageHosts, refusalExit } from "./lib/local.mjs";
 import { OUTAGE, outageMet, stopWaiting, unreachable, waitOutages } from "./lib/network.mjs";
@@ -937,6 +937,8 @@ async function main() {
   // The repository's usage-limit waits and, locally, the in-place bound (PENDULUM_LOCAL_WAIT_MINUTES).
   stageLimits(inputs, { local });
   waitOutages({ until: (since) => (local ? Math.min(since + OUTAGE.stageWaitMs, deadlineAt) : deadlineAt) });
+  // srt gone from the PATH mid-stage (a reinstall) is waited out within the same bound (harness.mjs srtBack).
+  SRT_GONE.wait = srtBack;
   const protectedList = protectedPaths(inputs.protectedAdditions);
   const records = [];
   let passes = 0;

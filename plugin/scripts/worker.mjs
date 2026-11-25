@@ -17,7 +17,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { dropOwned, privateTmp, writeOwn } from "./lib/fsafe.mjs";
 import { join, resolve } from "node:path";
 import { PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, installTools, runnerFileEnv, openRegeneration, runSetup } from "./lib/checkout.mjs";
-import { LIMIT, USAGE_LIMIT, UsageLimitReached, credentialEnv, gatewaySession, harnessVersion, runHarness, carveDriftReserve, passMaxUsd, scrubbedEnv, stageLimits } from "./lib/harness.mjs";
+import { LIMIT, USAGE_LIMIT, UsageLimitReached, credentialEnv, gatewaySession, harnessVersion, runHarness, carveDriftReserve, passMaxUsd, scrubbedEnv, srtBack, stageLimits } from "./lib/harness.mjs";
 import { addLabels, findPr, getIssue, getRepo, listComments, listReviews, listTimeline, prComment, primeWriters, markReady, removeLabel, repoOf, rest, runningSince } from "./lib/github.mjs";
 import { commandFailed, log, mask, parseArgs, postedError, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { useObjectiveZone } from "./lib/clock.mjs";
@@ -35,7 +35,7 @@ import { reviewHold, waitReason } from "./lib/overlap.mjs";
 import { accountGate, authorGate, choiceGate, planGate, startTime } from "./lib/objective-trust.mjs";
 import { stageStart } from "./lib/objective-cap.mjs";
 import { ranWith } from "./lib/choice.mjs";
-import { agentUser, exec } from "./lib/proc.mjs";
+import { SRT_GONE, agentUser, exec } from "./lib/proc.mjs";
 import { backend, spendInProgress } from "./lib/backend.mjs";
 import { openStageHosts, prepareClone, refusalExit } from "./lib/local.mjs";
 import { OUTAGE, outageMet, stopWaiting, unreachable, waitOutages } from "./lib/network.mjs";
@@ -206,6 +206,8 @@ async function main() {
   // The repository's usage-limit waits and, locally, the in-place bound (PENDULUM_LOCAL_WAIT_MINUTES).
   stageLimits(inputs, { local });
   waitOutages({ until: (since) => (local ? Math.min(since + OUTAGE.stageWaitMs, deadlineAt) : deadlineAt) });
+  // srt gone from the PATH mid-stage (a reinstall) is waited out within the same bound (harness.mjs srtBack).
+  SRT_GONE.wait = srtBack;
   const protectedList = protectedPaths(inputs.protectedAdditions);
   const records = [];
   let passes = 0;

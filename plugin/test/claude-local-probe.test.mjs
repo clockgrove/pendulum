@@ -1,15 +1,17 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { CLAUDE_DECOY_LAUNCH, CLAUDE_PROBE_RESULT, anthropicProbeModel, claudeProbeDriver } from "../scripts/lib/claude-local-probe.mjs";
-import { CLAUDE_PROBE_SCRIPT, claudeLocalCheck } from "../scripts/lib/harness.mjs";
+import { CLAUDE_PROBE_SCRIPT, claudeLocalCheck, srtBack } from "../scripts/lib/harness.mjs";
+import { SRT_GONE } from "../scripts/lib/proc.mjs";
 import { CONFINEMENT_PROBE, PROBE_MARKER, PROBE_PASS } from "../scripts/lib/codex-runner.mjs";
 import { PROBE_PERSIST, TOOLCHAIN_RULE } from "../scripts/lib/copilot-runner.mjs";
 import { GitRefusal, LOCAL_DOMAINS, gitRefusalReason } from "../scripts/lib/local.mjs";
+import { OUTAGE, resetNetwork, waitOutages } from "../scripts/lib/network.mjs";
 
 test("Claude Code's local probe: the driver proves the toolchain, tries the home, runs the confinement probe and writes its result", () => {
   const root = mkdtempSync(join(tmpdir(), "clp-"));
@@ -91,4 +93,35 @@ test("Claude Code's local probe before every start: launched as the run, the mar
   assert.match(gitRefusalReason("sandbox", 1, { rule: "the agent home is writable", harness: "claude", local: true }), /^Claude Code's sandbox started but does not confine here/);
   assert.match(gitRefusalReason("sandbox", 1, { harness: "claude", local: true }), /^Claude Code's sandbox could not start in local mode/);
   assert.match(gitRefusalReason("sandbox", 1, { rule: TOOLCHAIN_RULE, harness: "claude", local: true }), /^Claude Code's sandbox started but its commands do not find/);
+});
+
+// #668: srt gone as the probe launches (a reinstall relinks it) is waited out in place, then the probe runs; never a sandbox Block.
+test("Claude Code's local probe, real launch: srt gone waits for it at its floor, then the probe runs and passes", async () => {
+  const root = mkdtempSync(join(tmpdir(), "clc-srt-"));
+  const [tmp, home, usage, clone, srtDir] = ["t", "h", "u", "w", "s"].map((d) => join(root, d));
+  for (const d of [tmp, home, join(usage, "harness"), join(clone, ".git"), srtDir]) mkdirSync(d, { recursive: true });
+  const local = { clone, addDirs: [tmp], cacheDirs: [], readDirs: [usage], readOnly: [usage], domains: LOCAL_DOMAINS, readable: [] };
+  const ran = join(root, "ran");
+  const srt = `#!/bin/sh\nif [ "$1" = --version ]; then echo 0.0.83; exit 0; fi\necho >> '${ran}'\nprintf '0\\n%s\\n' '${PROBE_PASS}' > '${join(tmp, CLAUDE_PROBE_RESULT)}'\n`;
+  const saved = { sleep: OUTAGE.sleep, now: OUTAGE.now };
+  let t = Date.parse("2026-11-24T17:16:00Z");
+  const waits = [];
+  // srt comes back during the second wait.
+  Object.assign(OUTAGE, { now: () => t, sleep: async (ms) => (waits.push(ms), (t += ms), waits.length === 2 && writeFileSync(join(srtDir, "srt"), srt, { mode: 0o755 })) });
+  try {
+    waitOutages({ until: (since) => since + OUTAGE.stageWaitMs });
+    SRT_GONE.wait = srtBack;
+    await claudeLocalCheck(local, "/o.json", { PATH: srtDir, TMPDIR: tmp, PENDULUM_USAGE_DIR: usage }, { home });
+    assert.deepEqual(waits, [5_000, 10_000]);
+    assert.equal(readFileSync(ran, "utf8"), "\n", "the probe ran once, after srt came back");
+    // serve's process (no finite bound) never waits: the launch's own error stands.
+    waitOutages();
+    const gone = Object.assign(new Error("spawn srt ENOENT"), { code: "ENOENT" });
+    await assert.rejects(srtBack(gone, { env: { PATH: srtDir } }), (e) => e === gone);
+  } finally {
+    SRT_GONE.wait = null;
+    Object.assign(OUTAGE, saved);
+    resetNetwork();
+    rmSync(root, { recursive: true, force: true });
+  }
 });
