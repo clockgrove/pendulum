@@ -53,7 +53,8 @@ Copilot runs locally only on Linux and WSL2 hosts where its outer sandbox starts
      GitHub's rate limit on a probe ends the check there, with no further probe.
      `serve` checks a new token whose check got no clear answer again a minute later.
 
-   When GitHub refuses the token later (401: expired or revoked), `pendulum serve` starts no new work and says once where the token comes from.
+   When a tick gets a 401, `pendulum serve` reads with the token again at once. If GitHub takes it, the 401 was GitHub's for a moment and the tick runs again, once.
+   When GitHub refuses the token on that read too (expired or revoked), `pendulum serve` starts no new work and says once where the token comes from.
    A new token saved in that file is taken at the next tick, after the same checks (an exported `PENDULUM_LOCAL_TOKEN` needs serve started again).
    The refused token is tried again once a minute, so a 401 GitHub gave for a moment ends by itself.
 3. For Copilot only: create a fine-grained token with the Copilot Requests permission (Read) from a user with a Copilot seat.
