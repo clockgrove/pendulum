@@ -837,7 +837,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
       const { now, change, at: moved } = prepare.get(p);
       const { file, hunks } = got;
       const of = hunks.length;
-      const item = (hs) => ({ path: moved ?? p, ...(moved ? { moved: p } : {}), of, merged: !!change.merged, file: oid(now) ? file : null, hunks: hs.map(({ at, text, view }) => ({ at, text, view })) });
+      const item = (hs) => ({ path: moved ?? p, ...(moved ? { moved: p } : {}), ...(movedTo.size ? { renames: [...movedTo] } : {}), of, merged: !!change.merged, file: oid(now) ? file : null, hunks: hs.map(({ at, text, view }) => ({ at, text, view })) });
       const named = (h, why) => `hunk ${h.at} of ${of} (${h.header}): ${why}`;
       // A hunk no question can hold leaves the path not kept, each such hunk named; the others are not asked.
       const unjudged = hunks.filter((h) => h.over);
