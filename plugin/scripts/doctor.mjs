@@ -29,7 +29,7 @@ import { unrelayedGatewayKeys } from "./lib/worker-relay.mjs";
 import { backend } from "./lib/backend.mjs";
 import { lfsVersion, usesLfs } from "./lib/lfs.mjs";
 import { ROUTE_CREDENTIAL_INPUTS, ROUTE_SECRETS, accountEnv, accountSecretText, accountToken, chatgptLogin, defaultAccount, jobLevelCredentials, loadAccounts, routeAccounts, routeAccountsText, routeAutoSetting, routeCredentialEnv, routeCredentialSecrets, routeInputs, routeSecretSuffix, routeStageAccount, sandboxRoots } from "./lib/accounts.mjs";
-import { LOCAL_DOMAINS, PREVIOUS_NAME, TOKEN_LINK_FIX, pendulumKeyDir, previousKeyDirProblem, cloneRepo, codexLocalConfig, tokenLinkDetail, codexWrapper, credentialPaths, committedWorkflowEnv, droppedDomains, gitGuardScript, harnessInstall, harnessLogins, harnessOuterSettings, localBaseEnv, localToken, loginsExposedBy, ownLogin, ownLoginProblems, outerProbe, sandboxDroppedHosts, readWorkflowEnv, stageTemp, stageTmpBase, workflowEnv } from "./lib/local.mjs";
+import { LOCAL_DOMAINS, PREVIOUS_NAME, SRT_FIX, SRT_FLOOR, TOKEN_LINK_FIX, pendulumKeyDir, previousKeyDirProblem, cloneRepo, codexLocalConfig, tokenLinkDetail, codexWrapper, credentialPaths, committedWorkflowEnv, droppedDomains, gitGuardScript, harnessInstall, harnessLogins, harnessOuterSettings, localBaseEnv, localToken, loginsExposedBy, ownLogin, ownLoginProblems, outerProbe, sandboxDroppedHosts, readWorkflowEnv, srtAtFloor, srtVersion, stageTemp, stageTmpBase, workflowEnv } from "./lib/local.mjs";
 import { parseYaml, workflowEvents, writeGrants } from "./lib/yaml.mjs";
 import { appIdSetLine, appIdWhyText, learnAppId } from "./lib/app-id.mjs";
 import { AGENT_HOME, AGENT_USER, agentHomeProblem, agentLauncher } from "./lib/agent.mjs";
@@ -1826,23 +1826,15 @@ export function gitCheck(present, version) {
   return WARN("git", `git ${v} is older than ${min} and has no \`git merge-tree --merge-base\`: with a decider (the AI Gateway's model, or the stage's harness) every send-back's conflict pass Blocks (with decision_route off its commits are matched), and a review after a rebase reads the whole PR again`, `install git ${min} or later`);
 }
 
-/** The least srt local mode runs on: the release whose protected paths and Linux sandbox lib/local.mjs mirrors. */
-export const SRT_FLOOR = [0, 0, 83];
-
-/** srt's version as [major, minor, patch] from `srt --version`, or null when it cannot be read. */
-export function srtVersion(run = () => spawnSync("srt", ["--version"], { encoding: "utf8", timeout: 30_000 })) {
-  const r = run();
-  const m = r.status === 0 ? /(\d+)\.(\d+)\.(\d+)/.exec(String(r.stdout)) : null;
-  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
-}
+export { srtVersion };
 
 /** srt where local mode runs (`version` from srtVersion): FAIL below SRT_FLOOR or unreadable, naming the fix. */
 export function srtCheck(present, version) {
-  const fix = "npm i -g @anthropic-ai/sandbox-runtime@latest";
+  const fix = SRT_FIX;
   if (!present) return FAIL("srt", "srt not on PATH; Pendulum's own commands run in it", fix);
   const min = SRT_FLOOR.join(".");
   if (!version) return FAIL("srt", `present; its version could not be read (srt --version), and local mode needs ${min} or later`, fix);
-  if (gitAtLeast(version, SRT_FLOOR)) return PASS("srt", version.join("."));
+  if (srtAtFloor(version)) return PASS("srt", version.join("."));
   return FAIL("srt", `srt ${version.join(".")} is older than ${min}, the least local mode runs on`, fix);
 }
 

@@ -361,6 +361,18 @@ export function gitDirChanged(clone, id, pinFile = null) {
 }
 /** The Blocked reason a stage posts when the clone's .git is not the one Pendulum cloned: fixed text, no local path. */
 export const gitIdentityReason = (issue) => `local mode: the clone's .git is not the directory Pendulum cloned (git-identity); remove .pendulum/${issue} in the local clone to start the Objective afresh`;
+/** The least srt local mode runs on: the release whose protected paths and Linux sandbox this file mirrors. */
+export const SRT_FLOOR = [0, 0, 83];
+/** The fix for srt missing, or below SRT_FLOOR. */
+export const SRT_FIX = "npm i -g @anthropic-ai/sandbox-runtime@latest";
+/** srt's version as [major, minor, patch] from `srt --version`, or null when it cannot be read. */
+export function srtVersion(run = () => spawnSync("srt", ["--version"], { encoding: "utf8", timeout: 30_000 })) {
+  const r = run();
+  const m = r.status === 0 ? /(\d+)\.(\d+)\.(\d+)/.exec(String(r.stdout)) : null;
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+}
+/** Whether an srt `version` (srtVersion) is at SRT_FLOOR or later. */
+export const srtAtFloor = (version) => !!version && (version[0] - SRT_FLOOR[0] || version[1] - SRT_FLOOR[1] || version[2] - SRT_FLOOR[2]) >= 0;
 /** The rule Copilot's runner probe names when a command does not find or run the stage's toolchain (copilot-runner.mjs probeDriver). */
 export const TOOLCHAIN_RULE = "the stage's toolchain does not run in a command";
 /**
@@ -386,6 +398,8 @@ export const gitRefusalReason = (code, issue, { path = null, rule = null, harnes
               : harness === "copilot"
                 ? "Copilot's sandbox could not start on this runner (sandbox); the harness was not started, so no command ran unsandboxed. The doctor lines at the top of the work job's log (copilot sandbox: bwrap, slirp4netns, apparmor, start) name what is missing"
                 : "Codex's sandbox could not start on this runner (sandbox); the harness was not started, so no command ran unsandboxed. The doctor lines at the top of the work job's log (codex sandbox: bwrap, apparmor, start) name what is missing"
+        : code === "srt"
+          ? `srt, the sandbox the harness runs in, went missing during the stage and did not come back at ${SRT_FLOOR.join(".")} or later within the stage's wait (srt); the harness was not started. Reinstall it on the local machine (\`${SRT_FIX}\`), then re-apply \`pendulum:objective\``
         : code === "relay"
           ? `the gateway relay's forwarder did not come up in ${harness === "copilot" ? "Copilot" : harness === "claude" ? "Claude Code" : "Codex"}'s sandbox (relay); the harness was not started, and the key was never handed over. ${local ? "The stage log on the local machine" : "The work job's log"} has the probe's output`
           : "Pendulum's pre-start check of the checkout's git directory failed (git-clear); the harness was not started";
@@ -394,7 +408,7 @@ export const gitRefusalReason = (code, issue, { path = null, rule = null, harnes
  * finding it updates its comment rather than adding one), a new one for a fresh clone. The pin is hashed: no inode on GitHub.
  */
 export const gitIdentityKey = (stage, id) => `git-identity:${stage}:${createHash("sha256").update(String(id || "none")).digest("hex").slice(0, 12)}`;
-/** A harness start Pendulum refused (beforeHarness, a runner's pre-start clear, the relay probe): `code` is git-identity, git-state, git-clear, roots, sandbox or relay; the stage Blocks (gitRefusalReason). */
+/** A harness start Pendulum refused (beforeHarness, a runner's pre-start clear, the relay probe): `code` is git-identity, git-state, git-clear, roots, sandbox, srt or relay; the stage Blocks (gitRefusalReason). */
 export class GitRefusal extends Error {
   /** `path` (checkout-relative), `rule` (a fixed confinement rule), `harness` (whose sandbox) and `local` (local mode's probe): named in the Blocked reason (gitRefusalReason). */
   constructor(code, detail, { path = null, rule = null, harness = null, local = false } = {}) {
