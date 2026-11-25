@@ -379,7 +379,7 @@ export const TOOLCHAIN_RULE = "the stage's toolchain does not run in a command";
  * The Blocked reason for a harness start Pendulum refused (GitRefusal): fixed text per code, no local path and no command
  * output (both go to the stage log).
  */
-export const gitRefusalReason = (code, issue, { path = null, rule = null, harness = "codex", local = false } = {}) =>
+export const gitRefusalReason = (code, issue, { path = null, rule = null, harness = "codex", local = false, command = null } = {}) =>
   code === "git-identity"
     ? gitIdentityReason(issue)
     : code === "git-state"
@@ -399,7 +399,7 @@ export const gitRefusalReason = (code, issue, { path = null, rule = null, harnes
                 ? "Copilot's sandbox could not start on this runner (sandbox); the harness was not started, so no command ran unsandboxed. The doctor lines at the top of the work job's log (copilot sandbox: bwrap, slirp4netns, apparmor, start) name what is missing"
                 : "Codex's sandbox could not start on this runner (sandbox); the harness was not started, so no command ran unsandboxed. The doctor lines at the top of the work job's log (codex sandbox: bwrap, apparmor, start) name what is missing"
         : code === "srt"
-          ? `srt, the sandbox the harness runs in, went missing during the stage and did not come back at ${SRT_FLOOR.join(".")} or later within the stage's wait (srt); the harness was not started. Reinstall it on the local machine (\`${SRT_FIX}\`), then re-apply \`pendulum:objective\``
+          ? `srt, the sandbox Pendulum runs the harness and the repository's commands in, went missing during the stage and did not come back at ${SRT_FLOOR.join(".")} or later within the stage's wait (srt); ${command ? `\`${command}\`` : "the command"} was not started in it. Reinstall it on the local machine (\`${SRT_FIX}\`), then re-apply \`pendulum:objective\``
         : code === "relay"
           ? `the gateway relay's forwarder did not come up in ${harness === "copilot" ? "Copilot" : harness === "claude" ? "Claude Code" : "Codex"}'s sandbox (relay); the harness was not started, and the key was never handed over. ${local ? "The stage log on the local machine" : "The work job's log"} has the probe's output`
           : "Pendulum's pre-start check of the checkout's git directory failed (git-clear); the harness was not started";
@@ -410,9 +410,10 @@ export const gitRefusalReason = (code, issue, { path = null, rule = null, harnes
 export const gitIdentityKey = (stage, id) => `git-identity:${stage}:${createHash("sha256").update(String(id || "none")).digest("hex").slice(0, 12)}`;
 /** A harness start Pendulum refused (beforeHarness, a runner's pre-start clear, the relay probe): `code` is git-identity, git-state, git-clear, roots, sandbox, srt or relay; the stage Blocks (gitRefusalReason). */
 export class GitRefusal extends Error {
-  /** `path` (checkout-relative), `rule` (a fixed confinement rule), `harness` (whose sandbox) and `local` (local mode's probe): named in the Blocked reason (gitRefusalReason). */
-  constructor(code, detail, { path = null, rule = null, harness = null, local = false } = {}) {
-    super(`refusing to start the harness: ${detail}`);
+  /** `path` (checkout-relative), `rule` (a fixed confinement rule), `harness` (whose sandbox), `local` (local mode's probe) and `command` (what srt was to run, code srt): named in the Blocked reason (gitRefusalReason). */
+  constructor(code, detail, { path = null, rule = null, harness = null, local = false, command = null } = {}) {
+    super(`refusing to start ${command ? `\`${command}\`` : "the harness"}: ${detail}`);
+    this.command = command;
     this.code = code;
     this.path = path;
     this.rule = rule;
@@ -432,7 +433,7 @@ export function refusalExit(e, { stage, issue, env = process.env }) {
   } catch {
     // no pin to name: one key for the stage
   }
-  return { reason: gitRefusalReason(e.code, issue, { path: e.path, rule: e.rule, local: !!e.local, ...(e.harness ? { harness: e.harness } : {}) }), ...(e.code === "git-identity" ? { key: gitIdentityKey(stage, id) } : {}) };
+  return { reason: gitRefusalReason(e.code, issue, { path: e.path, rule: e.rule, local: !!e.local, command: e.command ?? null, ...(e.harness ? { harness: e.harness } : {}) }), ...(e.code === "git-identity" ? { key: gitIdentityKey(stage, id) } : {}) };
 }
 
 /**

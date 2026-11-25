@@ -8,14 +8,14 @@ import { homedir, tmpdir } from "node:os";
 import { appendOwn, dropOwned, writeNew, writeOwn } from "./fsafe.mjs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { SRT_GONE, agentUser, asAgent, exec, harnessHome, onPath, sudoEnv, whichSync } from "./proc.mjs";
+import { agentUser, asAgent, exec, harnessHome, onPath, sudoEnv, whichSync } from "./proc.mjs";
 import { readAgentFiles } from "./handoff.mjs";
 import { CLAUDE_DECOY_LAUNCH, CLAUDE_PROBE_RESULT, claudeProbeDriver } from "./claude-local-probe.mjs";
 import { asClaudeAgent, agentServicePorts, archiveSession, captureSession, capturedSession, keepSession, realRoots, resetClaudeState, writeEnvFile, restoreRunnerGit, runnerEnv, runnerLaunch, runnerLayout } from "./claude-runner.mjs";
 import { CONFINEMENT_PROBE, DECOY_LAUNCH, PROBE_MARKER, PROBE_PASS, codexRunnerConfig, codexRunnerEnv, codexRunnerLayout, offListHost, presentPaths, resetCodexState } from "./codex-runner.mjs";
 import { COPILOT_DECOY_LAUNCH, PROBE_PERSIST, PROBE_RESULT, RELAY_RULE, TOOLCHAIN_RULE, copilotLaunch, copilotRunnerEnv, copilotRunnerFlags, copilotRunnerLayout, probeEnv, probeMarker, probeModel, probeResult, resetCopilotState, resetProbe, stageNode } from "./copilot-runner.mjs";
 import { BILLING, COPILOT_CREDIT_USD, UNKNOWN_WHY, addBilling, codexPlanLimits, passBilling, answeredError, backgroundJobs, busyCode, markUnknown, mergeUsage, noResetLimit, parseUsage, quotaReading, refusalFields, requestRefused, runningTokens, sinceSession, subAgentRefusal, unknownOf, unknownRuns, usageLimited } from "./usage.mjs";
-import { NetworkDown, OUTAGE, givenUp, minutesText, networkBack, noteBusy, passCutOff, serverWait, stoppedWaiting, waitBound, waitingOutages } from "./network.mjs";
+import { NetworkDown, OUTAGE, SRT_WAIT, givenUp, minutesText, networkBack, noteBusy, passCutOff, serverWait, stoppedWaiting, waitBound, waitingOutages } from "./network.mjs";
 import { MAX_ROLLOUT_BYTES, codexRolloutFiles, codexSessionRoot, codexThreads, localRollouts, plainThread, withSubAgents } from "./codex-threads.mjs";
 import { backend } from "./backend.mjs";
 import { accountSecretText, chatgptLogin, routeCredentialEnv, routeInputs, routeStageAccount } from "./accounts.mjs";
@@ -1215,16 +1215,17 @@ async function runBusy(opts) {
 }
 
 /**
- * Wait for srt to come back on `env`'s PATH (proc.mjs SRT_GONE: a launch of srt, the harness's, its sandbox probe's or a
- * repository command's, that failed with ENOENT while srt was off the PATH, as when a reinstall relinks it). The stage
- * keeps its claim and work and waits in place to its bound for a wait (network.mjs waitBound, OUTAGE.stageWaitMs locally)
- * from `since`, the launch's first miss (now when null), probing after each of OUTAGE.probeMs (the last repeated) until
- * `srt --version` reads SRT_FLOOR or later; it resolves with `since`. A stop meanwhile parks the stage. Past the bound,
- * or in a process that does not wait, it throws GitRefusal `srt`: the stage Blocks naming the reinstall (local.mjs
+ * Wait for srt to come back on `env`'s PATH (proc.mjs SRT_GONE, which the worker and reviewer stages set to this: a
+ * launch of srt, the harness's, its sandbox probe's or a repository command's, that failed with `error`, ENOENT, while
+ * srt was off the PATH, as when a reinstall relinks it). The stage keeps its claim and work and waits in place to its
+ * bound for a wait (network.mjs waitBound, OUTAGE.stageWaitMs locally) from `since`, the launch's first miss (now when
+ * null), probing after each of OUTAGE.probeMs (the last repeated) until `srt --version` reads SRT_FLOOR or later; it
+ * resolves with `since`, or at once when `signal` aborts (exec then reports the run stopped). A stop meanwhile parks the
+ * stage. A process with no finite bound (serve, a command that does not wait) gets `error` back as it was. Past the
+ * bound it throws GitRefusal `srt`, naming what was launched (`args`): the stage Blocks naming the reinstall (local.mjs
  * gitRefusalReason). Once given up, a later miss checks srt once and throws at once while it is still not back.
  */
-let srtGivenUp = false;
-async function srtBack(env, since = null) {
+export async function srtBack(error, { env, since = null, args = [], signal = null }) {
   const floor = SRT_FLOOR.join(".");
   const back = () => {
     const version = srtVersion(() => spawnSync("srt", ["--version"], { env, encoding: "utf8", timeout: 30_000 }));
@@ -1232,10 +1233,18 @@ async function srtBack(env, since = null) {
   };
   const first = since === null;
   since ??= OUTAGE.now();
-  const bound = srtGivenUp ? null : waitBound(since);
-  if (first) log(`srt is missing (spawn srt ENOENT)${bound === null ? "" : `; waiting for srt ${floor} or later, for up to ${minutesText(bound - since)}`}`);
-  for (let i = 0; bound !== null && OUTAGE.now() < bound; i += 1) {
-    await OUTAGE.sleep(Math.min(OUTAGE.probeMs[Math.min(i, OUTAGE.probeMs.length - 1)], bound - OUTAGE.now()));
+  const refusal = () => new GitRefusal("srt", `srt missing since ${logTime(since)}, and not back at ${floor} or later`, { command: srtInner(args), local: true });
+  if (SRT_WAIT.givenUp) {
+    if (!back()) throw refusal();
+    SRT_WAIT.givenUp = false;
+    return since;
+  }
+  const bound = waitBound(since);
+  if (!Number.isFinite(bound)) throw error;
+  if (first) log(`srt is missing (spawn srt ENOENT); waiting for srt ${floor} or later, for up to ${minutesText(bound - since)}`);
+  for (let i = 0; OUTAGE.now() < bound; i += 1) {
+    await OUTAGE.sleep(Math.min(OUTAGE.probeMs[Math.min(i, OUTAGE.probeMs.length - 1)], bound - OUTAGE.now()), signal ?? undefined);
+    if (signal?.aborted) return since;
     if (stopping()) await parked();
     const version = back();
     if (version) {
@@ -1243,14 +1252,18 @@ async function srtBack(env, since = null) {
       return since;
     }
   }
-  if (srtGivenUp && back()) {
-    srtGivenUp = false;
-    return since;
-  }
-  if (waitingOutages()) srtGivenUp = true;
-  throw new GitRefusal("srt", `srt missing since ${logTime(since)}, and not back at ${floor} or later`, { local: true });
+  SRT_WAIT.givenUp = true;
+  throw refusal();
 }
-SRT_GONE.wait = srtBack;
+
+/** The command an srt launch runs (`args` after `--`, past `env` and its assignments), by name: what a Block names. */
+const srtInner = (args) => {
+  let i = args.indexOf("--") + 1;
+  if (i === 0) return null;
+  if (args[i] === "env") i += 1;
+  while (i < args.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(String(args[i]))) i += 1;
+  return args[i] === undefined ? null : String(args[i]).split("/").pop();
+};
 
 /** A pass's launch (proc.mjs exec); one that never started (srt not back in time: GitRefusal) ends its spend entry with a no-run record first. */
 async function launchOrEnd(metered, harness, model, label, cmd, args, opts) {

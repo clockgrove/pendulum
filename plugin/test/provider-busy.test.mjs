@@ -9,7 +9,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { jsonLines, noResetLimit, parseUsage, providerBusy, providerError, providerRefusal, refusalCause, requestRefused } from "../scripts/lib/usage.mjs";
 import { crashed, usageLimitExit } from "../scripts/lib/session.mjs";
-import { BUSY_PASS_PROMPT, USAGE_LIMIT, runHarness } from "../scripts/lib/harness.mjs";
+import { BUSY_PASS_PROMPT, USAGE_LIMIT, runHarness, srtBack } from "../scripts/lib/harness.mjs";
+import { SRT_GONE } from "../scripts/lib/proc.mjs";
 import { OUTAGE, resetNetwork, waitOutages } from "../scripts/lib/network.mjs";
 import { endedNotLost, needsWorkStep, workStepNumber } from "../scripts/lib/relaunch.mjs";
 
@@ -256,6 +257,7 @@ test("runHarness, real, fake srt: a launch that finds srt gone waits for it at i
   try {
     await inStage(bin, async ({ waits }) => {
       waitOutages({ until: (since) => since + OUTAGE.stageWaitMs });
+      SRT_GONE.wait = srtBack;
       const sleep = OUTAGE.sleep;
       // srt comes back during the second wait.
       OUTAGE.sleep = async (ms) => (await sleep(ms), waits.length === 2 && writeFileSync(join(srtDir, "srt"), FAKE_SRT, { mode: 0o755 }));
@@ -266,6 +268,7 @@ test("runHarness, real, fake srt: a launch that finds srt gone waits for it at i
       assert.equal(rec.ok, true);
     });
   } finally {
+    SRT_GONE.wait = null;
     rmSync(srtDir, { recursive: true, force: true });
   }
 });

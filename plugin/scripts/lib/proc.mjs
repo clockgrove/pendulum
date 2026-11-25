@@ -377,20 +377,31 @@ export async function exec(cmd, args, opts = {}) {
   const startedAt = Date.now();
   let since = null;
   for (;;) {
-    const timeoutMs = since !== null && opts.timeoutMs > 0 ? Math.max(1, opts.timeoutMs - (Date.now() - startedAt)) : opts.timeoutMs;
+    let timeoutMs = opts.timeoutMs;
+    if (since !== null) {
+      // Waited for srt: a stop meanwhile, or a wait that used the whole time cap, ends here without a launch.
+      const none = { code: null, signal: null, stdout: opts.encoding === "buffer" ? Buffer.alloc(0) : "", stderr: opts.encoding === "buffer" ? Buffer.alloc(0) : "", timedOut: false, idle: false, idleOpen: 0, stopped: false, truncated: false, readError: null };
+      if (opts.signal?.aborted) return { ...none, stopped: true };
+      if (timeoutMs > 0) {
+        timeoutMs -= Date.now() - startedAt;
+        if (timeoutMs <= 0) return { ...none, timedOut: true };
+      }
+    }
     try {
       return await execOnce(cmd, args, { ...opts, timeoutMs });
     } catch (e) {
       const env = opts.env ?? process.env;
       if (cmd !== "srt" || e?.code !== "ENOENT" || !SRT_GONE.wait || whichSync("srt", env)) throw e;
-      since = await SRT_GONE.wait(env, since);
+      since = await SRT_GONE.wait(e, { env, since, args, signal: opts.signal ?? null });
     }
   }
 }
 
 /**
- * A process's wait for srt gone from a launch's PATH (harness.mjs srtBack): called with the launch's env and the wait's
- * first start (null at the first miss), it resolves with that start once srt is back, or throws. Null: exec's failure stands.
+ * A stage's wait for srt gone from a launch's PATH (harness.mjs srtBack, set by the worker and reviewer stages beside
+ * their outage bound): called with the launch's ENOENT and {env, since, args, signal}, `since` the wait's first start
+ * (null at the first miss), it resolves with that start once srt is back or `signal` aborts, or throws. Null: exec's
+ * failure stands.
  */
 export const SRT_GONE = { wait: null };
 
