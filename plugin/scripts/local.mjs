@@ -37,6 +37,7 @@ import { githubStatus } from "./lib/adapters/github-status.mjs";
 const requestKey = (o) => `${o.origin ?? o.host ?? ""} ${o.endpoint ?? ""}`;
 const pausesText = (n) => `${n} pause${n === 1 ? "" : "s"}`;
 import { PLUGIN_ROOT, installCommand } from "./lib/checkout.mjs";
+import { STATUS_MAX_CALLS, readStatus, renderStatus } from "./lib/status.mjs";
 import { DEFAULT_DAYS, DEFAULT_MAX_CALLS, PARTIAL_CODES, REPORT_SCHEMA, STOPPED_EXIT, buildReport, readReport, renderReport, reportCheck, reportModels, reportScope } from "./lib/report.mjs";
 import { ghLoginToken, activeWorkIssues, addLabels, collaboratorPermission, ensureLabel, hasMergeQueue, findPr, mergeQueueEntry, mergeQueueHeads, findProject, getIssue, getPr, getPrSettled, labeledAtIn, listComments, listIssuesByLabel, markReady, moveCard, postReview, prComment, prDiff, primeSelf, primeWriters, removeLabel, repoOf, rest, setStateLabel, transientError, upsertComment, organizationVariableNames, repositoryVariables } from "./lib/github.mjs";
 import { PENDULUM_VERSION, LOCAL_BOUNDS, holdSecrets, input, timeZoneName, localBound, localLimits, log, logTo, postedError, readFlags, redactSecrets, resolveInputs, workflowDriftLines, workflowSettings, MACHINE_FALLBACK_SETTINGS, MACHINE_SETTINGS, MODEL_SETTINGS, ignoredLines, layerLines, machineSettings, organizationVariablesLine, settingLayers } from "./lib/inputs.mjs";
@@ -282,6 +283,11 @@ export const COMMANDS = {
     flags: { ...WHERE, since: { value: "DATE" }, until: { value: "DATE" }, issue: { value: "N[,N...]", many: true }, label: { value: "NAME" }, parent: { value: "N", number: true }, compare: { value: "NAME[,NAME]", many: true }, "compare-label": { value: "LABEL", many: true }, json: "bool", "max-calls": { value: "N", number: true }, by: { value: "account" }, rates: { value: "MODEL[,MODEL...]", many: true }, app: { value: "ID", number: true }, self: { value: "LOGIN", many: true } },
     check: reportCheck,
     about: `cost and token use of a period (--since, --until; the ${DEFAULT_DAYS} days before --until or now, from UTC midnight, by default) or a set of Objectives (--issue, --label, --parent), or two experiment arms side by side (--compare A,B: the pendulum:experiment:<name> labels; --compare-label for any two labels), every figure precomputed (--rates: the ratio of each named model's published rates to each recorded model's of one vendor, on its recorded token mix, no dollar unit): --json for the documented schema (${REPORT_SCHEMA}), else Markdown; prints its planned GitHub calls first and stops at --max-calls (${DEFAULT_MAX_CALLS}), exiting ${STOPPED_EXIT} with what it read`,
+  },
+  status: {
+    args: [],
+    flags: { ...WHERE, json: "bool", "max-calls": { value: "N", number: true }, app: { value: "ID", number: true } },
+    about: `the repository's open issues, read-only: those that need an owner (no assignee) with the evidence, the assigned ones with their linked PRs, the Objectives by state, and each parent's sub-issues with the blocked ones and their recorded reason, anything unread as unknown; writes nothing and starts nothing; --json for the schema; at most --max-calls GitHub calls (${STATUS_MAX_CALLS}), exits ${STOPPED_EXIT} when they stopped it`,
   },
   zone: { args: [], flags: {}, about: "this machine's time zone as the hidden line an Objective's body starts with (<!-- pendulum:tz NAME -->), so the times its stages write read in its filer's zone; pendulum-file adds it" },
   hold: {
@@ -4830,6 +4836,30 @@ export async function reportCommand(flags, { out = (t) => process.stdout.write(t
 }
 
 /**
+ * `pendulum status`: the repository's open issues as a read-only triage view (lib/status.mjs) of the repository (--repo,
+ * else the clone's origin; with --repo it runs outside a clone too), read with the local token, else the gh login. JSON
+ * with --json, else Markdown, on stdout; Pendulum's log lines on stderr. Returns 0, or STOPPED_EXIT when the call budget
+ * stopped the reads (the view printed is partial).
+ */
+export async function statusCommand(flags, { out = (t) => process.stdout.write(t), err = (t) => process.stderr.write(t), token = null, env = process.env } = {}) {
+  const here = resolve(flags.checkout || process.cwd());
+  let checkout = null;
+  try {
+    checkout = cloneTop(here, "--repo OWNER/NAME");
+  } catch (e) {
+    if (!flags.repo) throw e;
+  }
+  const repoFull = cloneRepo(checkout ?? here, flags.repo);
+  logTo(process.stderr);
+  const { objectiveLabel } = resolveInputs({ args: { repo: repoFull }, env });
+  const envAppId = /^\d+$/.test(String(env.PENDULUM_LOCAL_APP_ID ?? "").trim()) ? Number(env.PENDULUM_LOCAL_APP_ID) : null;
+  const appId = flags.app ?? envAppId ?? readLocalAppId(repoFull).id ?? null;
+  const view = await readStatus(repoOf(repoFull), { token: token ?? sessionToken(repoFull), appId, objectiveLabel, maxCalls: flags["max-calls"] ?? STATUS_MAX_CALLS, log: (line) => err(`${line}\n`) });
+  out(flags.json ? `${JSON.stringify(view, null, 2)}\n` : renderStatus(view));
+  return view.stoppedAt === null ? 0 : STOPPED_EXIT;
+}
+
+/**
  * `pendulum doctor`: doctor.mjs --local on the clone (its top directory) and its repository, --repo else the clone's
  * origin (cloneRepo); with --repo, it runs outside a clone too. Returns doctor's exit code.
  */
@@ -4960,6 +4990,10 @@ async function main() {
   }
   if (cmd === "report") {
     process.exitCode = await reportCommand(flags);
+    return;
+  }
+  if (cmd === "status") {
+    process.exitCode = await statusCommand(flags);
     return;
   }
   if (cmd === "zone") {
