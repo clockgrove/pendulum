@@ -548,7 +548,8 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
    * a head that does not contain `onto` (the conflict pass gave up); or the branch's change not kept in it (keptLeft,
    * on content; with no `judge`, a stage with no decider, commitsLeft first). Read on git's exit codes and fields only.
    * `box.rebaseNote`: a path the branch's commits changed and undid, which the head changes anyway (unsettled `undone`),
-   * said for the progress comment, never a Block; "" when none. `regenerate` (the repository has a regeneration
+   * and a file the branch adds that the conflict pass renamed and kept (keptLeft), said for the progress comment, never a
+   * Block; "" when none. `regenerate` (the repository has a regeneration
    * command): a path `onto` declares generated is not checked, and `box.regenerated` lists each one left out.
    */
   box.rebaseLeft = async ({ from, onto, judge = null, maxMs = JUDGE_MAX_MS, regenerate = false }) => {
@@ -660,9 +661,11 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
    * conflicts, its side of that merge; for any other path, what that merge would still change there. Its hunks are judged
    * against the head's file, whole or around each hunk (kept.mjs hunkView): all in one question, or in groups packed in
    * order up to JUDGE_PATH_MAX_BYTES; a group not kept asks each of its hunks alone; a path is kept when every group is.
-   * A change with no hunk is decided exactly. Returns "" or why, naming each path not
-   * kept, the branch's commits that changed it, the first hunk not kept and why; null, with no `judge`, when a path is
-   * not exactly the branch's.
+   * A change with no hunk is decided exactly. A file the branch adds that the conflict pass renamed (renamedIn) is
+   * decided at its new name as the branch adding it, the question naming the old one. Returns "" or why, naming each
+   * path not kept (with its new name, for a moved one), the branch's commits that changed it, the first hunk not kept
+   * and why; null, with no `judge`, when a path is not exactly the branch's. A moved file kept is added to
+   * `box.rebaseNote`, naming both paths.
    */
   const keptLeft = async ({ paths, old, head, onto, replayed, merged, stages, mergeConflicts, from, judge, maxMs = JUDGE_MAX_MS }) => {
     const empty = await git(["hash-object", "-t", "blob", "-w", "--stdin"], { input: "" });
@@ -698,16 +701,23 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
         .map((l) => (head(l) ? ids.reduce((x, id) => x.replaceAll(id, () => p), l) : l))
         .join("\n");
     };
+    const movedTo = await renamedIn({ paths, old, head, onto, replayed, stages, entry });
     // Each path decided exactly where it can be; the rest queued for the decision model.
     const verdicts = new Map();
     const prepare = new Map();
     // The head's entries at the replay's conflicted paths, read once when a rename conflict needs them.
     let held = null;
+    // A moved file kept: said on the progress comment, naming both paths.
+    const movedKept = [];
     for (const p of paths) {
       const st = stages.get(p);
       const theirs = st ? st[3] || "" : await entry(replayed.tree, p);
-      const now = await entry(head, p);
-      if (now === theirs) continue;
+      const at = movedTo.get(p);
+      const now = await entry(head, at ?? p);
+      if (now === theirs) {
+        if (at) movedKept.push(`${p} to ${at}`);
+        continue;
+      }
       if (!judge) return null;
       const exact = await (async () => {
         // A name only the branch's side has in a replay conflict (the branch renamed the file where the default branch
@@ -733,14 +743,16 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
       })();
       if (exact !== null) {
         if (exact) verdicts.set(p, exact);
+        else if (at) movedKept.push(`${p} to ${at}`);
         continue;
       }
-      // The branch's change to the path, as two entries: for a conflict of the replay, its side from their base; for a
-      // conflict of merging it into the head, its side of that merge (wherever git's rename detection put it); for any
-      // other path, the head's file to what that merge leaves (`merged`: what it would still change).
+      // The branch's change to the path, as two entries: for a file the conflict pass moved, the branch adding it; for a
+      // conflict of the replay, its side from their base; for a conflict of merging it into the head, its side of that
+      // merge (wherever git's rename detection put it); for any other path, the head's file to what that merge leaves
+      // (`merged`: what it would still change).
       const ms = !st && mergeConflicts.has(p) ? merged.stages.get(p) : null;
-      const change = st ? { before: st[1] || "", after: st[3] || "" } : ms ? { before: ms[1] || "", after: ms[3] || "" } : { before: now, after: await entry(merged.tree, p), merged: true };
-      prepare.set(p, { now, change });
+      const change = at ? { before: "", after: theirs } : st ? { before: st[1] || "", after: st[3] || "" } : ms ? { before: ms[1] || "", after: ms[3] || "" } : { before: now, after: await entry(merged.tree, p), merged: true };
+      prepare.set(p, { now, change, at });
       verdicts.set(p, null);
     }
     const queued = paths.filter((p) => verdicts.get(p) === null);
@@ -822,10 +834,10 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     const judgePath = async (p) => {
       const got = await ready(p);
       if (typeof got === "string") return got;
-      const { now, change } = prepare.get(p);
+      const { now, change, at: moved } = prepare.get(p);
       const { file, hunks } = got;
       const of = hunks.length;
-      const item = (hs) => ({ path: p, of, merged: !!change.merged, file: oid(now) ? file : null, hunks: hs.map(({ at, text, view }) => ({ at, text, view })) });
+      const item = (hs) => ({ path: moved ?? p, ...(moved ? { moved: p } : {}), of, merged: !!change.merged, file: oid(now) ? file : null, hunks: hs.map(({ at, text, view }) => ({ at, text, view })) });
       const named = (h, why) => `hunk ${h.at} of ${of} (${h.header}): ${why}`;
       // A hunk no question can hold leaves the path not kept, each such hunk named; the others are not asked.
       const unjudged = hunks.filter((h) => h.over);
@@ -893,11 +905,69 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     const lost = [];
     for (const p of paths) {
       const why = verdicts.get(p);
-      if (!why) continue;
+      if (!why) {
+        if (prepare.get(p)?.at) movedKept.push(`${p} to ${movedTo.get(p)}`);
+        continue;
+      }
       const commits = (await git(["rev-list", "--abbrev-commit", "--abbrev=7", `${old}..${from}`, "--", `:(literal)${p}`])).stdout.split("\n").filter(Boolean);
-      lost.push(`${p}${commits.length ? ` (${listed(commits, 3)})` : ""}: ${why}`);
+      lost.push(`${p}${movedTo.has(p) ? `, moved to ${movedTo.get(p)},` : ""}${commits.length ? ` (${listed(commits, 3)})` : ""}: ${why}`);
     }
-    return lost.length ? `the branch it left drops the Objective's change to ${lost.length} path(s): ${lost.join("; ")}` : "";
+    if (lost.length) return `the branch it left drops the Objective's change to ${lost.length} path(s): ${lost.join("; ")}`;
+    if (movedKept.length) box.rebaseNote = [box.rebaseNote, `the conflict pass renamed the branch's ${movedKept.join(", ")}, which keeps its change`].filter(Boolean).join("; ");
+    return "";
+  };
+
+  /**
+   * #673: where the conflict pass moved a file the branch adds past a name the default branch added (a numbered migration
+   * renumbered): a Map of each such path to its new name. Looked for only where the head lacks the path or holds the
+   * default branch's file there, and only among the names the head adds (against `onto`) that the branch's change does
+   * not have (absent from `replayed`), paired by git's rename detection between the branch's version of those paths and
+   * the head's files at those names, and nothing else; a regular file each.
+   */
+  const renamedIn = async ({ paths, old, head, onto, replayed, stages, entry }) => {
+    const regular = (e) => ["100644", "100755"].includes(e.split(" ")[0]);
+    const from = [];
+    for (const p of paths) {
+      const st = stages.get(p);
+      const theirs = st ? st[3] || "" : await entry(replayed.tree, p);
+      if (!theirs || !regular(theirs) || (await entry(old, p))) continue;
+      const now = await entry(head, p);
+      if (now === theirs || (now && now !== (await entry(onto, p)))) continue;
+      from.push([p, theirs]);
+    }
+    if (!from.length) return new Map();
+    const added = async (a) => {
+      const r = await git(["diff", "--name-only", "--no-renames", "--diff-filter=A", "-z", a, head]);
+      if (r.code !== 0) throw new Error(`git diff exited ${r.code}`);
+      return r.stdout.split("\0").filter(Boolean);
+    };
+    const notBranch = new Set(await added(replayed.tree));
+    const to = [];
+    for (const q of await added(onto)) {
+      if (!notBranch.has(q) || paths.includes(q)) continue;
+      const e = await entry(head, q);
+      if (e && regular(e)) to.push([q, e]);
+    }
+    if (!to.length) return new Map();
+    // Each side as a tree of its own, written from a scratch index.
+    const tree = async (rows) => {
+      const env = { ...gitEnv(), GIT_INDEX_FILE: join(scratch, `moved-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.index`) };
+      try {
+        const u = await git(["update-index", "--add", "-z", "--index-info"], { env, input: rows.map(([p, e]) => `${e.split(" ")[0]} ${e.split(" ")[1]}\t${p}\0`).join("") });
+        if (u.code !== 0) throw new Error(`git update-index exited ${u.code}`);
+        const w = await git(["write-tree"], { env });
+        if (w.code !== 0 || !SHA.test(w.stdout.trim())) throw new Error(`git write-tree exited ${w.code}`);
+        return w.stdout.trim();
+      } finally {
+        rmSync(env.GIT_INDEX_FILE, { force: true });
+      }
+    };
+    const r = await git(["diff", "-M", "--name-status", "--diff-filter=R", "--no-ext-diff", "--no-textconv", "-z", await tree(from), await tree(to)]);
+    if (r.code !== 0) throw new Error(`git diff exited ${r.code}`);
+    const f = r.stdout.split("\0");
+    const moved = new Map();
+    for (let i = 0; i + 2 < f.length; i += 3) if (/^R\d*$/.test(f[i])) moved.set(f[i + 1], f[i + 2]);
+    return moved;
   };
 
   /**
