@@ -239,3 +239,21 @@ test("endedNotLost: the work job's conclusion and steps place a vanished stage, 
   assert.deepEqual(endedNotLost({ record: { state: "ended" } }), { by: "sandbox" });
   assert.equal(endedNotLost({ job: null }), null);
 });
+
+// #666: srt missing for a moment mid-stage (a reinstall relinks it) is waited out in place, never a crash.
+test("runHarness, real, fake srt: a launch that finds srt gone waits for it at its floor, then the pass runs", async () => {
+  const { bin, calls } = fakeCodex([null]);
+  const srtDir = mkdtempSync(join(tmpdir(), "pendulum-srt-"));
+  const srt = `#!/bin/sh\nif [ "$1" = --version ]; then echo 0.0.83; exit 0; fi\nwhile [ "$1" != -- ]; do shift; done\nshift\nexec "$@"\n`;
+  await inStage(bin, async ({ waits }) => {
+    waitOutages({ until: (since) => since + OUTAGE.stageWaitMs });
+    const sleep = OUTAGE.sleep;
+    // srt comes back during the second wait.
+    OUTAGE.sleep = async (ms) => (await sleep(ms), waits.length === 2 && writeFileSync(join(srtDir, "srt"), srt, { mode: 0o755 }));
+    const env = { HOME: process.env.HOME, PATH: `${srtDir}:${bin}:/usr/bin:/bin`, PENDULUM_LOCAL_SRT: "srt.json", PENDULUM_LOCAL_SRT_HARNESS: "outer.json" };
+    const rec = await runHarness(pass(bin, { env }));
+    assert.deepEqual(waits, [5_000, 10_000]);
+    assert.equal(calls().length, 1);
+    assert.equal(rec.ok, true);
+  });
+});

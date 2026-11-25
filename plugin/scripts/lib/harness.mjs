@@ -1,7 +1,7 @@
 // Launch a harness headless, with the task card as the prompt and a wall clock,
 // and turn what it printed into one usage record. The CLI flags are each vendor's
 // documented headless flags; the tests in plugin/test/usage.test.mjs pin them.
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { copyFileSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -26,7 +26,7 @@ import { relayProbeCommand } from "./relay-shim.mjs";
 import { parked, stageStopSignal, stageStopped, stopping } from "./stop.mjs";
 import { harnessActivity } from "./logic.mjs";
 import { logTime, whenText } from "./clock.mjs";
-import { AGENT_SHELL_TELEMETRY_OFF, GitRefusal, HARNESS_GIT_ENV, claudeLocalSettings, claudeRunnerSettings, clearHarnessConfig, codexLocalConfig, codexShellExclude, copilotCacheHome, copilotHomeFiles, copilotTmpdir, harnessGitEnv, isLocal, openedStageHosts, pinnedInode, runnerDomains, sandboxedVersion, stageTemp } from "./local.mjs";
+import { AGENT_SHELL_TELEMETRY_OFF, GitRefusal, HARNESS_GIT_ENV, claudeLocalSettings, claudeRunnerSettings, clearHarnessConfig, codexLocalConfig, codexShellExclude, copilotCacheHome, copilotHomeFiles, copilotTmpdir, harnessGitEnv, isLocal, openedStageHosts, pinnedInode, runnerDomains, sandboxedVersion, SRT_FLOOR, srtAtFloor, srtVersion, stageTemp } from "./local.mjs";
 
 export const CLI = {
   claude: { bin: "claude", pkg: "@anthropic-ai/claude-code" },
@@ -1214,6 +1214,45 @@ async function runBusy(opts) {
   return busy.length ? joinLost(busy, rec, { busy: true }) : rec;
 }
 
+/**
+ * A pass's launch (proc.mjs exec). Its launch through srt, local mode's outer sandbox, failing with ENOENT while srt is
+ * not on the launch's PATH is srt missing for a moment (a reinstall relinks it), no crash: the stage keeps its claim and
+ * work and waits in place (srtBack), then launches again. Any other launch failure stands.
+ */
+async function launchPass(label, cmd, args, opts) {
+  for (;;) {
+    try {
+      return await exec(cmd, args, opts);
+    } catch (e) {
+      if (cmd !== "srt" || e?.code !== "ENOENT" || whichSync("srt", opts.env)) throw e;
+      await srtBack(opts.env, label);
+    }
+  }
+}
+
+/**
+ * Wait for srt to come back on `env`'s PATH: from now to the stage's bound for a wait in place (network.mjs waitBound,
+ * OUTAGE.stageWaitMs locally), probing after each of OUTAGE.probeMs (the last repeated) until `srt --version` reads
+ * SRT_FLOOR or later. A stop meanwhile parks the stage. Past the bound, or in a process that does not wait, it throws
+ * GitRefusal `srt`: the stage Blocks naming the reinstall (local.mjs gitRefusalReason).
+ */
+async function srtBack(env, label) {
+  const since = OUTAGE.now();
+  const bound = waitBound(since);
+  const floor = SRT_FLOOR.join(".");
+  log(`${label}: srt is missing (spawn srt ENOENT)${bound === null ? "" : `; waiting for srt ${floor} or later, for up to ${minutesText(bound - since)}`}`);
+  for (let i = 0; bound !== null && OUTAGE.now() < bound; i += 1) {
+    await OUTAGE.sleep(Math.min(OUTAGE.probeMs[Math.min(i, OUTAGE.probeMs.length - 1)], bound - OUTAGE.now()));
+    if (stopping()) await parked();
+    const version = srtVersion(() => spawnSync("srt", ["--version"], { env, encoding: "utf8", timeout: 30_000 }));
+    if (srtAtFloor(version)) {
+      log(`${label}: srt ${version.join(".")} is back after ${minutesText(OUTAGE.now() - since)}; launching the pass again`);
+      return;
+    }
+  }
+  throw new GitRefusal("srt", `srt missing since ${logTime(since)}, and not back at ${floor} or later`, { local: true });
+}
+
 /** What a pass whose provider was busy is told when its session runs again. */
 export const BUSY_PASS_PROMPT = "Your previous run stopped because the model provider was busy. Continue the same task from where it stopped; do not redo finished steps.";
 
@@ -1530,7 +1569,7 @@ async function runPass({ harness, model, prompt, maxUsd, resume, agent, cwd, env
     }
   };
   // Local mode: the harness leads its own process group, named in the usage directory while it runs (proc.mjs exec `record`).
-  const r = await exec(execCmd, execArgs, { cwd, env: execEnv, input: stdin, timeoutMs, tee: eventsFile, echo: true, onLine: lines, idleMs, openItems: activity.open, answerStreams: !!HARNESS_DELTAS[harness], harnessHome: harnessHome(whichSync(cmd, childEnv) || cmd, childEnv), dropLine: HARNESS_DELTAS[harness] ? (l) => deltaLine(harness, l) : null, signal: subStop ? AbortSignal.any([signal, subStop.signal]) : signal, agentExtra, group: backend(env).name === "local", record: backend(env).name === "local" && eventsFile ? dirname(eventsFile) : null, fileStdio: true });
+  const r = await launchPass(label, execCmd, execArgs, { cwd, env: execEnv, input: stdin, timeoutMs, tee: eventsFile, echo: true, onLine: lines, idleMs, openItems: activity.open, answerStreams: !!HARNESS_DELTAS[harness], harnessHome: harnessHome(whichSync(cmd, childEnv) || cmd, childEnv), dropLine: HARNESS_DELTAS[harness] ? (l) => deltaLine(harness, l) : null, signal: subStop ? AbortSignal.any([signal, subStop.signal]) : signal, agentExtra, group: backend(env).name === "local", record: backend(env).name === "local" && eventsFile ? dirname(eventsFile) : null, fileStdio: true });
   // Stopped on a sub-agent's refusal: the refusal is the run's end, not a stop by Pendulum.
   if (subRefused && r.stopped && !signal.aborted) r.stopped = false;
   await backend(env).sandbox.reap();

@@ -990,6 +990,8 @@ So what it runs on the host itself (its git, a hook, a config a future version l
 
 The login the stage runs on stays readable inside it; no other login does.
 The harness's version check (`--version`), for the outer probe and for each stage's usage record, runs in `srt` too.
+A pass that finds `srt` gone from the PATH as it launches (a reinstall relinks it) waits in place, as for the network: the stage keeps its claim and work, checks `srt --version` for 0.0.83 or newer, and launches the pass once it is back.
+Past fifteen minutes (`PENDULUM_LOCAL_WAIT_MINUTES`) the stage Blocks, naming the fix: `npm i -g @anthropic-ai/sandbox-runtime@latest`.
 
 **The harness's own sandbox inside it.** The harness's own sandbox runs inside the outer one, which needs nested user namespaces and unix sockets in `srt`.
 The read-only paths inside its writable ones still hold against code that makes its own user namespace (`srt`'s mounts are locked there).
