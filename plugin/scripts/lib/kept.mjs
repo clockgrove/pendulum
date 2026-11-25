@@ -21,6 +21,7 @@ export const KEPT_QUESTION = {
     "You are given one or more numbered hunks of the branch's change to one file (lines starting with - it removed, lines starting with + it added, the rest context showing where it applied; " +
     "where git merged the branch's change into the file without a conflict, hunks of what that merge would still change in it), " +
     "and the file as the rebased branch has it: whole, or for each hunk the lines around where it applies. " +
+    "A file the branch added may have been renamed in the rebase, past a name the default branch added (a numbered file renumbered): the hunks are then of the branch's file under its old name, judged against the file at its new name, and a reference changed to the new name is adapted. " +
     "Decide whether every given hunk's effect is still in the file: what it added is there and what it removed is gone, as written or adapted to fit the default branch's code " +
     "(renamed, reformatted, moved nearby, given more arguments, wrapped or extended). " +
     "The file may differ from a hunk's context and hold lines no hunk mentions: other changes and additions are allowed and are not your concern. " +
@@ -91,9 +92,9 @@ export function hunkView({ file, hunk, moves = [], max, context, whole = true })
  * What the decision model is given about a path: the path, its hunks (each {at, text, view}, `at` of `of`; `merged`:
  * hunks of what merging the branch's change into the file would still change), and the file as the rebased branch has
  * it: `file` whole (null: the head has no such file), or each hunk's `view` ({file, lines: {from, to, total}}, the lines
- * around it) right after it.
+ * around it) right after it. `moved`: the name the branch added the file under, which the rebase renamed to `path`.
  */
-export function keptInput({ path, hunks = [], of = hunks.length, merged = false, file = null }, tag = randomBytes(8).toString("hex")) {
+export function keptInput({ path, moved = null, hunks = [], of = hunks.length, merged = false, file = null }, tag = randomBytes(8).toString("hex")) {
   const data = (title, text, empty = NONE) => [title, `<<<BEGIN ${tag}>>>`, text === null || text === undefined ? NONE : String(text).trimEnd() || empty, `<<<END ${tag}>>>`, ""];
   const what = merged ? "what merging the branch's change into the file would still change" : "the branch's change to the file";
   const parts = hunks.flatMap((h) => [
@@ -101,7 +102,8 @@ export function keptInput({ path, hunks = [], of = hunks.length, merged = false,
     ...(h.view ? data(`Lines ${h.view.lines.from} to ${h.view.lines.to} of the ${h.view.lines.total} the file has in the rebased branch, around where hunk ${h.at} applies:`, h.view.file, EMPTY) : []),
   ]);
   const whole = hunks.some((h) => h.view) ? [] : data("The whole file as the rebased branch has it:", file, EMPTY);
-  return redactSecrets([...data("File:", path), ...parts, ...whole].join("\n").trimEnd());
+  const from = moved ? data("The branch added the file under this name, and the rebase renamed it to the one above:", moved) : [];
+  return redactSecrets([...data("File:", path), ...from, ...parts, ...whole].join("\n").trimEnd());
 }
 
 /**

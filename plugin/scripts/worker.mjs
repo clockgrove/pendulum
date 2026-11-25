@@ -63,7 +63,7 @@ import { flushDecisionSpend } from "./lib/decision-spend.mjs";
  * merging (a send-back), or the default branch changing a workflow file during the run (outbox.mjs catchUp).
  */
 export function conflictPassPrompt({ prompt, branch, defaultBranch, cause = "after a sibling merged", regenerate = null }) {
-  const here = `Your branch ${branch} fell behind ${defaultBranch} ${cause}, and \`git rebase origin/${defaultBranch}\` conflicts. Rebase it onto origin/${defaultBranch} (Pendulum has fetched it; never fetch or pull), resolve each conflict keeping both the default branch's change and this Objective's intent.`;
+  const here = `Your branch ${branch} fell behind ${defaultBranch} ${cause}, and \`git rebase origin/${defaultBranch}\` conflicts. Rebase it onto origin/${defaultBranch} (Pendulum has fetched it; never fetch or pull), resolve each conflict keeping both the default branch's change and this Objective's intent. A file this branch added whose name clashes with one ${defaultBranch} added (a numbered migration, say) may be renamed past it, with every reference to it fixed.`;
   return `${prompt.trimEnd()}\n\n---\n\n${here}${regenerate ? ` ${regenerateStep({ ...regenerate, defaultBranch })}` : ""} Run the validation commands, commit, and stop: Pendulum pushes the branch. Do not ask questions.`;
 }
 

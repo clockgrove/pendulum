@@ -407,6 +407,22 @@ test("#619: a declared generated file both sides changed takes the base's side u
   assert.equal(await t.box.push(), false);
 });
 
+test("#673: a branch-added file the conflict pass renumbers past main's is checked under its new name; dropped, it is named at its old one", async () => {
+  const y = (n) => `create table y (id int);\n-- migration ${n}_y\ninsert into y values (1);\ninsert into y values (2);\n`;
+  const pass = async (keep) => {
+    const t = await sentBack({ base: { "m/index.txt": "0001_a\n" }, commits: [{ "m/0002_y.sql": y("0002"), "m/index.txt": "0001_a\n0002_y\n" }], main: { "m/0002_x.sql": "create table x (id int);\n", "m/index.txt": "0001_a\n0002_x\n" } });
+    assert.throws(() => t.go("rebase", "-q", "origin/main"));
+    t.go("rm", "-q", "-f", "m/0002_y.sql");
+    if (keep) writeFileSync(join(t.r.work, "m/0003_y.sql"), y("0003"));
+    writeFileSync(join(t.r.work, "m/index.txt"), `0001_a\n0002_x\n${keep ? "0003_y\n" : ""}`);
+    t.go("add", "-A", "m");
+    t.go("-c", "core.editor=true", "rebase", "--continue");
+    return t.box.rebaseLeft({ from: t.from, onto: t.onto, judge: fakeJudge({ "m/0002_y.sql": "lost" }).judge });
+  };
+  assert.equal(await pass(true), "");
+  assert.match(await pass(false), /: m\/0002_y\.sql \([0-9a-f]{7}\): hunk 1 of 1 \(@@ -0,0 \+1,4 @@\): the decision model \(fake\/model\) judged it lost/);
+});
+
 test("#452: in local mode a conflict pass the check cannot pass is kept on a branch of the Objective's clone, and nothing of it is pushed", async () => {
   const { sendBackGuard } = await import("../scripts/worker.mjs");
   const t = await staleConflict(staleFile(300, touch, markStale), { adapt: true, outbox: { local: true } });
