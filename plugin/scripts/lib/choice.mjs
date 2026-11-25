@@ -166,6 +166,7 @@ export function chosenInputs({ args = {}, env = process.env, choice = {}, gatewa
 const EXACT_VERSION = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
 const STABLE_VERSION = /^(\d+)\.(\d+)\.(\d+)$/;
 const DAY_MS = 86_400_000;
+const daysText = (n) => `${n} day${n === 1 ? "" : "s"}`;
 const PIN_FIX = (h = "<harness>") => `Pin a version: set harness_version (PENDULUM_HARNESS_VERSION) in .github/workflows/pendulum.yml to ${h}=<version>, an exact version from npm, and merge it; then resume through Draft.`;
 
 /**
@@ -189,11 +190,22 @@ export function harnessPins(spec, workflowHarness) {
   return { ok: true, pins };
 }
 
-/** The npm registry's document for `pkg` (its `time` map, `versions` and `dist-tags`); throws when it cannot be read. */
-export async function npmPackument(pkg, { fetchFn = fetch } = {}) {
-  const r = await fetchFn(`https://registry.npmjs.org/${String(pkg).replace("/", "%2f")}`, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(60_000) });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  return r.json();
+/**
+ * The npm registry's document for `pkg` (its `time` map, `versions` and `dist-tags`), read once more after `retryMs` when
+ * the first read fails, so one blip does not Block a stage; throws when neither read answers.
+ */
+export async function npmPackument(pkg, { fetchFn = fetch, retryMs = 3000 } = {}) {
+  const read = async () => {
+    const r = await fetchFn(`https://registry.npmjs.org/${String(pkg).replace("/", "%2f")}`, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(60_000) });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return r.json();
+  };
+  try {
+    return await read();
+  } catch {
+    await new Promise((done) => setTimeout(done, retryMs));
+    return read();
+  }
 }
 
 const newer = (a, b) => {
@@ -212,7 +224,7 @@ export async function resolveHarnessVersion({ harness, pkg, spec, workflowHarnes
   const p = harnessPins(spec, workflowHarness);
   if (!p.ok) return { problem: { reason: p.reason, fix: p.fix } };
   if (p.pins[harness]) return { version: p.pins[harness], why: "pinned by harness_version" };
-  const unread = (what) => ({ problem: { reason: `${harness}'s CLI version could not be chosen: ${what}, and Pendulum never installs a release younger than ${minAgeDays} days (harness_min_age_days)`, fix: `${PIN_FIX(harness)} Or resume once the npm registry answers.` } });
+  const unread = (what) => ({ problem: { reason: `${harness}'s CLI version could not be chosen: ${what}, and Pendulum never installs a release younger than ${daysText(minAgeDays)} (harness_min_age_days)`, fix: `${PIN_FIX(harness)} Or resume once the npm registry answers.` } });
   let doc;
   try {
     doc = await registry(pkg);
@@ -230,8 +242,8 @@ export async function resolveHarnessVersion({ harness, pkg, spec, workflowHarnes
     if (!m || !(t <= cutoff) || !doc.versions[v] || doc.versions[v].deprecated || newer(m, latest)) continue;
     if (!best || newer(m, best.m)) best = { m, v, at: new Date(t).toISOString() };
   }
-  if (!best) return unread(`${pkg} has no release at least ${minAgeDays} days old`);
-  return { version: best.v, why: `the newest release at least ${minAgeDays} days old (published ${best.at.slice(0, 10)}${best.v === latest[0] ? "" : `; latest is ${latest[0]}`})` };
+  if (!best) return unread(`${pkg} has no release at least ${daysText(minAgeDays)} old`);
+  return { version: best.v, why: `the newest release at least ${daysText(minAgeDays)} old (published ${best.at.slice(0, 10)}${best.v === latest[0] ? "" : `; latest is ${latest[0]}`})` };
 }
 
 /**

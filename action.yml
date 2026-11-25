@@ -409,11 +409,15 @@ runs:
         DEFAULT_HARNESS="$(name "${PENDULUM_INPUT_HARNESS:-${VARIABLE_HARNESS:-$WORKFLOW_HARNESS}}")"
         HARNESS="$(name "${PENDULUM_CHOSEN_HARNESS:-$DEFAULT_HARNESS}")"
         # The exact version (lib/choice.mjs resolveHarnessVersion): the harness's pin, else the newest release at least
-        # harness_min_age_days old. None when the registry cannot be read: nothing is installed, and the stage Blocks on
-        # the step's version_problem output before any harness runs.
+        # harness_min_age_days old. Anything but one exact version (none when the registry cannot be read): nothing is
+        # installed, and the stage Blocks on the step's version_problem output before any harness runs, the script's own
+        # reason when it wrote one.
         VERSION="$(node "$GITHUB_ACTION_PATH/plugin/scripts/objective-harness.mjs" --resolve "$HARNESS" --workflow-harness "$WORKFLOW_HARNESS")"
         echo "harness=$HARNESS" >> "$GITHUB_OUTPUT"
-        if [ -z "$VERSION" ]; then exit 0; fi
+        if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
+          grep -q '^version_problem=' "$GITHUB_OUTPUT" || echo 'version_problem={"reason":"the install step chose no exact harness CLI version"}' >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
         # Claude Code's postinstall puts its native binary in place (without it `claude` is a stub that exits 1); npm 11
         # asks for each package's scripts to be allowed by name, and this allows that one package's only.
         case "$HARNESS" in

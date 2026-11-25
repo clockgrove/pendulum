@@ -430,7 +430,9 @@ export const START = [
   "fi",
   'want="$6"; [ -n "$want" ] || { echo "no harness CLI version was chosen" >&2; exit 1; }',
   'have="$(bare /usr/local/bin/"$4" --version 2>/dev/null | head -1 || true)"',
-  'if [ -z "$have" ] || [ "${have#*"$want"}" = "$have" ]; then bare sudo -n sh -c \'umask 022; exec npm install -g --prefix /usr/local --no-audit --no-fund --loglevel=error "$1"\' sh "$5@$6" >&2; fi',
+  // The installed one counts only when a word of its `--version` line is exactly the version asked (`codex-cli 0.172.0`,
+  // `2.1.331 (Claude Code)`, a trailing period dropped): 2.1.33 is not 2.1.331.
+  'if [ -z "$have" ] || ! printf "%s\\n" $have | sed "s/[.,]$//" | grep -qxF -- "$want"; then bare sudo -n sh -c \'umask 022; exec npm install -g --prefix /usr/local --no-audit --no-fund --loglevel=error "$1"\' sh "$5@$6" >&2; fi',
   // Everything the stage writes is its user's alone: the logs, the usage, the tokens' socket.
   "umask 077",
   // The stage's start time, the launcher's and the stage's alike (its record writes carry it).

@@ -42,7 +42,7 @@ export async function installVersion({ harness, workflowHarness, env = process.e
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  if (args.resolve) {
+  if ("resolve" in args) {
     logTo(process.stderr);
     const r = await installVersion({ harness: String(args.resolve), workflowHarness: String(args.workflow_harness || "") });
     if (r.problem && process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `version_problem=${JSON.stringify(r.problem)}\n`);
