@@ -429,6 +429,7 @@ test("#452: in local mode a conflict pass the check cannot pass is kept on a bra
   const head = t.r.run(t.r.work, "rev-parse", "HEAD");
   const why = await sendBackGuard({ outbox: t.box, onto: { from: t.from, base: t.onto, files: ["src/stale.ts"] }, defaultBranch: "main", judge: fakeJudge({}, 0.23).judge, issue: 1 });
   assert.ok(why.includes("pendulum/1-conflict-pass"), why);
+  assert.ok(why.includes(`git fetch .pendulum/1/repo pendulum/1-conflict-pass && git push --force-with-lease=refs/heads/pendulum/1:${t.from} origin ${head}:refs/heads/pendulum/1`), why);
   assert.equal(await t.box.push(), false);
   assert.equal(t.r.run(t.r.origin, "rev-parse", "pendulum/1"), t.from, "the branch on GitHub is as it was");
   // The next stage puts the clone back on the branch as GitHub has it; the conflict pass's head stays on its branch.
