@@ -16,6 +16,7 @@
 // write access), so a comment by anyone else never settles a finding, whatever it says.
 import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
+import { stripVTControlCharacters } from "node:util";
 import { openDecider } from "./decider.mjs";
 import { postReply, rest, resolveThread, reviewThreads } from "./github.mjs";
 import { parseReplies } from "./handoff.mjs";
@@ -277,6 +278,19 @@ const short = (sha) => String(sha || "").slice(0, 7);
 /** The time a named test's run leaves the stage for its exit, and the least a run is worth starting with. */
 export const TEST_RESERVE_MS = 3 * 60_000;
 export const TEST_MIN_MS = 60_000;
+/** How much of a failed named test's output its note carries to the next answer pass (#677): its last lines, cut. */
+export const FAILED_TAIL = Object.freeze({ lines: 20, chars: 2000 });
+
+/** The last lines of a failed named test's output (FAILED_TAIL), held secrets redacted first, terminal escapes and control characters out. */
+export const failedTail = (output) =>
+  stripVTControlCharacters(redactSecrets(String(output ?? "")))
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "")
+    .trimEnd()
+    .split("\n")
+    .slice(-FAILED_TAIL.lines)
+    .join("\n")
+    .slice(-FAILED_TAIL.chars);
 
 
 /**
@@ -292,8 +306,8 @@ export const TEST_MIN_MS = 60_000;
  * - Each run gets the stage's time left (`timeoutMs()`) less `reserveMs`, and none starts with under `minMs` of it.
  * - The run without the fix counts only on a `before` known green (`beforeGreen(sha)`, the caller's: Pendulum's validated
  *   marker on it and no held red there), since a command that runs more than the test fails on a red `before` anyway.
- * Returns `{fixed: true, head, before, run}` (fails without the fix, passes with it), `{failed: true, head, run, code}`
- * (fails on the head), `{passes: true, before, run}` (passes without the fix too: no evidence), or `{unchecked: why}`
+ * Returns `{fixed: true, head, before, run}` (fails without the fix, passes with it), `{failed: true, head, run, code,
+ * output}` (fails on the head; `output`, runValidation's), `{passes: true, before, run}` (passes without the fix too: no evidence), or `{unchecked: why}`
  * (the reply then goes to the decision model, checkAnswers):
  * not a validation command, no test argument, a `before` not known green, a dependency manifest or lockfile changed
  * since `before` (dependencyFile),
@@ -329,7 +343,7 @@ export function namedTestRunner({ checkout, commands = [], env = process.env, he
     const r = await runValidation(checkout, [line], { timeoutMs: cap, env }).catch((e) => ({ error: String(e?.message || e).slice(0, 160) }));
     if (r.error) return { unchecked: `\`${line}\` could not start (${r.error})` };
     if (r.failed?.timedOut) return { unchecked: `\`${line}\` timed out` };
-    return { green: !!r.green, code: r.failed?.code ?? 0 };
+    return { green: !!r.green, code: r.failed?.code ?? 0, output: r.failed?.output ?? "" };
   };
   return async (test, { before = null } = {}) => {
     if (broken) return { unchecked: broken };
@@ -344,7 +358,7 @@ export function namedTestRunner({ checkout, commands = [], env = process.env, he
     // With the fix: the head as the stage pushed it.
     const after = await run(line);
     if (!after.unchecked && !(await atHead())) {
-      if (!after.green) return { failed: true, head, run: line, code: after.code };
+      if (!after.green) return { failed: true, head, run: line, code: after.code, output: after.output };
     } else {
       const left = await back();
       return { unchecked: after.unchecked || left || "the test changed tracked files" };
@@ -406,7 +420,9 @@ export const FOUND = Object.freeze({ testFailed: "test-failed", notFixed: "not-f
  * is as it was. `decisions`: the maintainers' recorded decisions the check may read a
  * finding as settled by, only as session.mjs objectiveDecisions returns them (authors with write access).
  * Returns {resolved, open, unjudged, found, outcomes}: ids; `unjudged`, the ones the decider gave no verdict on, each {id,
- * error}; `found`, what the check found on each finding it left open, each {id, kind (FOUND), note}; `outcomes`, how
+ * error}; `found`, what the check found on each finding it left open, each {id, kind (FOUND), note}, and
+ * on a `test-failed` one `test` ({run, code, output}: the output's tail, failedTail), which the next answer pass reads
+ * (session.mjs openFindingsExit, #677); `outcomes`, how
  * each answered finding ended (#546), each {id, outcome} (logic.mjs FINDING_OUTCOMES), from the branch the check took
  * and whether it ended resolved (its evidence posted and its thread resolved, or a thread already resolved, which gets
  * no evidence post), never from a note. The stage's progress reporter, when it keeps a findings record
@@ -441,7 +457,7 @@ export async function checkAnswers({ repo, issue, prNumber, findings = [], repli
     const id = String(f.id);
     if (r.fixed) how.set(id, "fixed-test");
     if (r.fixed) yes.set(id, `the test this answer names fails without the fix and passes with it: \`${r.run}\`, by the repository's validation command \`${test.command}\`, failed on the tree of ${short(r.before)} (where the finding was raised, the test's own files as the head has them) and passed on ${short(r.head)}. The finding is resolved.`);
-    else if (r.failed) found.push({ id: f.id, kind: FOUND.testFailed, note: `test failed: \`${r.run}\` exited ${r.code} on ${short(r.head)}` });
+    else if (r.failed) found.push({ id: f.id, kind: FOUND.testFailed, note: `test failed: \`${r.run}\` exited ${r.code} on ${short(r.head)}`, test: { run: r.run, code: r.code, output: failedTail(r.output) } });
     else pre.set(id, r.passes ? `not evidence: \`${r.run}\` passes without the fix too, on the tree of ${short(r.before)}` : `not checkable: ${r.unchecked}`);
     log(`finding check: ${findingPlace(f)} (comment ${f.id}): ${r.fixed ? `the named test fails without the fix and passes with it: ${r.run}` : r.failed ? found.at(-1).note : `${pre.get(id)}; the decision model judges the reply`}`);
   }

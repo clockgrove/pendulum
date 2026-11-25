@@ -4032,7 +4032,9 @@ const ROUNDS_RECORD = (issue) => `<!-- pendulum:${issue}:answer-rounds-record `;
  * record by Pendulum or someone who can push, since two routes can write it), as far as it counts since the Objective's
  * last activation, restart or Block, from the issue's timeline. `rounds` lists the times of each
  * answer round started; `checks`, each review stage's finding check that left findings without a verdict
- * ({at, ids, error}) or, after one, judged them all ({at, ids: []}), oldest first. Throws when it cannot be read.
+ * ({at, ids, error}) or, after one, judged them all ({at, ids: []}), oldest first; the newest may carry `tests`, the
+ * named tests that failed on the findings it left open ({id, note, output}, #677), for the next answer pass (lastTests).
+ * Throws when it cannot be read.
  */
 export async function readAnswerRounds(repo, { issue, prNumber, objectiveLabel }, opts) {
   const [comments, since] = await Promise.all([
@@ -4049,7 +4051,7 @@ export async function readAnswerRounds(repo, { issue, prNumber, objectiveLabel }
       const v = JSON.parse(line.slice(ROUNDS_RECORD(issue).length, -4));
       if (Number(v?.pr) !== Number(prNumber)) continue;
       if (Array.isArray(v.rounds)) rounds.push(...v.rounds.filter(after));
-      if (Array.isArray(v.checks)) checks.push(...v.checks.filter((x) => after(x?.at) && Array.isArray(x.ids)).map((x) => ({ at: x.at, ids: x.ids.map((i) => (typeof i === "number" ? i : String(i))), error: typeof x.error === "string" ? x.error : null, ...(x.limit === true ? { limit: true } : {}) })));
+      if (Array.isArray(v.checks)) checks.push(...v.checks.filter((x) => after(x?.at) && Array.isArray(x.ids)).map((x) => ({ at: x.at, ids: x.ids.map((i) => (typeof i === "number" ? i : String(i))), error: typeof x.error === "string" ? x.error : null, ...(x.limit === true ? { limit: true } : {}), ...(Array.isArray(x.tests) ? { tests: x.tests.filter((t) => t && typeof t.note === "string").map((t) => ({ id: typeof t.id === "number" ? t.id : String(t.id), note: t.note, output: typeof t.output === "string" ? t.output : "" })) } : {}) })));
     } catch {
       // not a record
     }
@@ -4075,8 +4077,18 @@ export const checkState = (rec) => {
   return { unjudged: failed[0]?.ids ?? [], failed: failed.filter((x) => !x.limit).length, error: failed[0]?.error ?? null, judgeOnly };
 };
 
+/**
+ * The named tests that failed on the findings the last finding check left open (#677), by finding id: each `{note,
+ * output}`, the output's tail (finding-check.mjs failedTail). The next answer pass reads them beside the finding.
+ */
+export const lastTests = (rec) => new Map((rec?.checks?.at(-1)?.tests || []).map((t) => [String(t.id), { note: t.note, output: t.output }]));
+
+/** The most failed named tests one record keeps (the newest check's only): a record is one issue comment. */
+const TESTS_KEPT = 5;
+
+// The record's JSON sits in an HTML comment: `<` and `>` in a test's output are escaped so none can close it.
 const writeAnswerRecord = (repo, { issue, prNumber }, rec, opts) =>
-  upsertComment(repo, issue, marker(issue, "answer-rounds"), `${ROUNDS_RECORD(issue)}${JSON.stringify({ pr: Number(prNumber), rounds: rec.rounds, checks: rec.checks.slice(-FINDING_CHECK_TRIES - 1) })} -->\nPendulum: PR #${Number(prNumber)} had review findings still open after its answer pass; the review ran again to answer them ${rec.rounds.length} time(s) since its last re-entry (at most ${ANSWER_ROUNDS}).`, opts);
+  upsertComment(repo, issue, marker(issue, "answer-rounds"), `${ROUNDS_RECORD(issue)}${JSON.stringify({ pr: Number(prNumber), rounds: rec.rounds, checks: rec.checks.slice(-FINDING_CHECK_TRIES - 1).map(({ tests, ...x }, i, all) => (i === all.length - 1 && tests?.length ? { ...x, tests: tests.slice(0, TESTS_KEPT) } : x)) }).replace(/</g, "\\u003c").replace(/>/g, "\\u003e")} -->\nPendulum: PR #${Number(prNumber)} had review findings still open after its answer pass; the review ran again to answer them ${rec.rounds.length} time(s) since its last re-entry (at most ${ANSWER_ROUNDS}).`, opts);
 
 /**
  * Start one more answer round on `prNumber` when the bound allows: under ANSWER_ROUNDS since the last re-entry
@@ -4090,7 +4102,7 @@ export async function takeAnswerRound(repo, ctx, opts, { check = null, rec = nul
   // wrote may repeat one), so two rounds taken in one millisecond would count as one.
   const last = Math.max(...now.rounds.map(Date.parse).filter(Number.isFinite), -Infinity);
   const at = new Date(Math.max(Date.now(), last + 1)).toISOString();
-  const checks = check ? [...now.checks, { at, ids: check.ids, ...(check.error ? { error: check.error } : {}), ...(check.limit ? { limit: true } : {}) }] : now.checks;
+  const checks = check ? [...now.checks, { at, ids: check.ids, ...(check.error ? { error: check.error } : {}), ...(check.limit ? { limit: true } : {}), ...(check.tests?.length ? { tests: check.tests } : {}) }] : now.checks;
   if (now.rounds.length >= ANSWER_ROUNDS) return { taken: false, rounds: now.rounds.length };
   // The round and the check it follows share their time: that stage answers (checkState judgeOnly).
   const rounds = [...now.rounds, at];
@@ -4118,10 +4130,16 @@ const checkCause = (error) => (error === "auth" ? "setup" : error === "rate_limi
  * - The stage harness's usage limit stopped the check (`limit`, its refusal): that check is recorded but counts as no try,
  *   and with nothing else judged the exit is `usageLimit` (the refusal), which the caller ends the stage on as a pass
  *   meeting the limit does (session.mjs usageLimitExit: paused or held, never this Block).
+ * - A named test that failed on the head (`found`'s `test`, finding-check.mjs) goes in the record with the round
+ *   (lastTests: its command, exit code and output's tail), so the next answer pass hears why it did not prove the fix
+ *   (#677); past the bound the Block's detail gives the same.
+ * - `sendBack`: the PR conflicts with the default branch, and the dispatcher sends it back for a rebase. Within the bounds
+ *   the exit is delivered with no `rerun` and the review label stays off: the round is taken (or the check recorded) now,
+ *   and the review after the rebase answers (or judges) them. Past a bound the Block stands as above.
  * A record that cannot be read or written, or a label that cannot go back on, Blocks as any exit step does (exitStep).
  * Returns `decision`, changed.
  */
-export async function openFindingsExit(decision, { repo, issue, prNumber, objectiveLabel, open = [], unjudged = [], found = [], decider = null, limit = null }, opts) {
+export async function openFindingsExit(decision, { repo, issue, prNumber, objectiveLabel, open = [], unjudged = [], found = [], decider = null, limit = null, sendBack = false }, opts) {
   delete decision.findingsOpen;
   const ctx = { issue, prNumber, objectiveLabel };
   const rec = await exitStep(decision, `the answer rounds on PR #${prNumber} could not be read`, () => readAnswerRounds(repo, ctx, opts));
@@ -4130,7 +4148,10 @@ export async function openFindingsExit(decision, { repo, issue, prNumber, object
   const pending = open.filter((c) => errors.has(String(c.id)));
   const judged = open.filter((c) => !errors.has(String(c.id)));
   const codes = [...new Set(pending.map((c) => errors.get(String(c.id))))];
-  const check = { ids: pending.map((c) => c.id), error: codes.join(",") || null, ...(limit && pending.length ? { limit: true } : {}) };
+  // The named tests that failed on the findings left open: the next answer pass reads them (lastTests).
+  const openIds = new Set(judged.map((c) => String(c.id)));
+  const tests = found.filter((x) => x.test && openIds.has(String(x.id))).map((x) => ({ id: x.id, note: x.note, output: String(x.test.output ?? "") }));
+  const check = { ids: pending.map((c) => c.id), error: codes.join(",") || null, ...(limit && pending.length ? { limit: true } : {}), ...(tests.length ? { tests } : {}) };
   // What the finding check found on each one it left open (finding-check.mjs FOUND): named beside its place.
   const notes = new Map(found.map((x) => [String(x.id), x.note]));
   const where = (list) => listed(list.map((c) => `${placeOf({ path: c.path, line: c.line ?? c.original_line ?? null })}${notes.has(String(c.id)) ? ` (${notes.get(String(c.id))})` : ""}`));
@@ -4153,22 +4174,24 @@ export async function openFindingsExit(decision, { repo, issue, prNumber, object
       log(decision.reason);
       return decision;
     }
-    Object.assign(decision, { exit: "delivered", rerun: true, reason: `${who} gave no verdict (${check.error}) on the answers to ${pending.length} reviewer finding(s) (${where(pending)}); the review runs again to judge them, with no worker pass (${tries} of ${FINDING_CHECK_TRIES} stages without a verdict)` });
+    Object.assign(decision, { exit: "delivered", rerun: !sendBack, reason: `${who} gave no verdict (${check.error}) on the answers to ${pending.length} reviewer finding(s) (${where(pending)}); the review ${sendBack ? "after the rebase judges them" : "runs again to judge them"}, with no worker pass (${tries} of ${FINDING_CHECK_TRIES} stages without a verdict)` });
     delete decision.cause;
     log(decision.reason);
-    await relabel(`the answers to ${pending.length} reviewer finding(s) are still to be judged`);
+    if (!sendBack) await relabel(`the answers to ${pending.length} reviewer finding(s) are still to be judged`);
     return decision;
   }
   const round = await exitStep(decision, `the answer rounds on PR #${prNumber} could not be recorded`, () => takeAnswerRound(repo, ctx, opts, { check, rec }));
   if (!round) return decision;
   if (!round.taken) {
+    // The named tests that failed, each with its output's tail, as the Block's detail (applyExit's Last output).
+    if (tests.length) decision.detail = tests.map((t) => `${placeOf(judged.find((c) => String(c.id) === String(t.id)) ?? {})}: ${t.note}\n${t.output}`).join("\n\n");
     Object.assign(decision, { exit: "blocked", cause: "work", reason: `${judged.length} reviewer finding(s) still open on PR #${prNumber} after ${round.rounds} answer round(s): ${where(judged)}. Fix them on the branch, or answer each on the PR: a reply by someone who can push in its thread, or resolve the thread (for a finding in the review body, a comment by someone who can push starting \`<!-- pendulum:${issue}:resolved:<finding id> -->\`); then ${RESUME_OBJECTIVE}` });
     return decision;
   }
-  Object.assign(decision, { exit: "delivered", rerun: true, reason: `${judged.length} reviewer finding(s) still open after the answer pass (${where(judged)})${pending.length ? `, and ${pending.length} answer(s) still to be judged` : ""}; the review runs again to answer them (round ${round.round} of ${ANSWER_ROUNDS})` });
+  Object.assign(decision, { exit: "delivered", rerun: !sendBack, reason: `${judged.length} reviewer finding(s) still open after the answer pass (${where(judged)})${pending.length ? `, and ${pending.length} answer(s) still to be judged` : ""}; ${sendBack ? "the review after the rebase answers them" : "the review runs again to answer them"} (round ${round.round} of ${ANSWER_ROUNDS})` });
   delete decision.cause;
   log(decision.reason);
-  await relabel(`${judged.length} reviewer finding(s) are still open`);
+  if (!sendBack) await relabel(`${judged.length} reviewer finding(s) are still open`);
   return decision;
 }
 
