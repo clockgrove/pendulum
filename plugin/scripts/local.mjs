@@ -30,7 +30,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createHash, randomBytes } from "node:crypto";
 import { dispatch } from "./dispatch.mjs";
-import { OUTAGE, causeCode, githubOrigin, lostText, minutesText, probe as probeHost, serverDown, serverWait, waitOutages } from "./lib/network.mjs";
+import { OUTAGE, causeCode, isGithubOrigin, lostText, minutesText, probe as probeHost, serverDown, serverWait, waitOutages } from "./lib/network.mjs";
 import { githubStatus } from "./lib/adapters/github-status.mjs";
 
 /** A paused stage's failed request as serve tells its 5xx pauses apart: the request (`endpoint`) and its host. */
@@ -2154,7 +2154,7 @@ export class Local {
     const what = Number.isFinite(reset)
       ? `GitHub's ${o.quota || "core"} API rate limit on ${o.host || "GitHub"} is spent until ${whenText(reset)}; the claim stays and this loop resumes it after the reset`
       : serverDown(o.code)
-        ? `${lostText(o.host || "GitHub", o.code, o.endpoint)} since ${whenText(server.since)}; the claim stays and this loop resumes it in ${minutesText(serverWait(server.pauses))} (pause ${server.pauses})${o.origin === githubOrigin() ? ", going by GitHub's status page" : ""}`
+        ? `${lostText(o.host || "GitHub", o.code, o.endpoint)} since ${whenText(server.since)}; the claim stays and this loop resumes it in ${minutesText(serverWait(server.pauses))} (pause ${server.pauses})${isGithubOrigin(o.origin) ? ", going by GitHub's status page" : ""}`
         : `${lostText(o.host || "the network", o.code || "no answer")} since ${whenText(since)}; the claim stays and this loop resumes it once that host answers`;
     log(`#${issue}: the ${result?.stage || "work"} stage paused: ${what}`);
   }
@@ -2806,7 +2806,7 @@ export class Local {
     const now = at ?? (this.clock ?? Date.now)();
     const paused = !!off && !off.harness && !off.pinWait;
     // Only GitHub's own 5xx is GitHub's status page's to judge: a pause on another host waits on, within the bound.
-    const verdict = paused && serverDown(off.code) && !!off.server && off.origin === githubOrigin() && now - off.since < OUTAGE.blockMs ? await this.serverVerdict(issue, off) : null;
+    const verdict = paused && serverDown(off.code) && !!off.server && isGithubOrigin(off.origin) && now - off.since < OUTAGE.blockMs ? await this.serverVerdict(issue, off) : null;
     const own = verdict?.block ?? null;
     const draftOpts = { ...this.opts, cache: (this.timelines ??= new Map()) };
     if (paused && (own || now - off.since >= OUTAGE.blockMs)) {

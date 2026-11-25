@@ -904,7 +904,8 @@ export function commandFailed(what, r, fields = {}) {
   const exit = r?.code ?? r?.signal ?? null;
   const said = `${what}${exit === null ? "" : ` (exit ${exit})`}`;
   const lines = String(r?.stderr ?? "").split("\n").map((l) => l.trim()).filter(Boolean);
-  if (lines.length) log(`${said}: ${lines.slice(-5).join(" | ").slice(0, 1000)}`);
+  // Redacted before it is cut, so a cut never leaves part of a held secret.
+  if (lines.length) log(`${said}: ${redactSecrets(lines.slice(-5).join(" | ")).slice(0, 1000)}`);
   const cause = withoutLocalPaths(gitError(r?.stderr)).slice(0, 300);
   return Object.assign(new Error(`${said}${cause ? `: ${cause}` : ""}; ${logName()} has its output`), fields);
 }

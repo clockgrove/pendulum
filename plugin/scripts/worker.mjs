@@ -1077,7 +1077,7 @@ async function main() {
   }
   // A conflict no pass resolved, and no cap or plan-time Question to name: Blocked with it, not as a run that left no commits.
   if (catchConflict() && !planNeeds && !rec.timedOut && !rec.budgetExceeded && !rec.refusal) outbox.block(outbox.error);
-  if (!pushed) log(`push refused: ${outbox.error}${outbox.detail ? ` (GitHub: ${outbox.detail})` : ""}`);
+  if (!pushed) log(`push refused: ${outbox.error}`);
   else if (outbox.merged) log(`${defaultBranch} changed ${outbox.merged.paths.join(", ")} since the branch's base: Pendulum merged ${defaultBranch}@${outbox.merged.default.slice(0, 7)} into ${branch} before pushing${outbox.synced ? "" : " (the checkout could not take the merge; the next push builds on it)"}${outbox.lfsWarning ? `; warning: ${outbox.lfsWarning}` : ""}`);
   let { pr: found, delta } = await observe(repo, outbox, { branch }, token);
   const hits = protectedTouched(delta.files, protectedList);

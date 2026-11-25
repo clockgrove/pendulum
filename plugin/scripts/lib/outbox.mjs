@@ -18,7 +18,7 @@ import { agentUser, exec, runnerCommand, sudoEnv } from "./proc.mjs";
 import { RETRY } from "./github.mjs";
 import { UsageLimitReached } from "./harness.mjs";
 import { NetworkDown, OUTAGE, downFor, gitProxyEnv, networkBack, originOf, stoppedWaiting, unreachableNow, waitingOutages } from "./network.mjs";
-import { commandFailed, gitError, heldSecrets, log, secretForms } from "./inputs.mjs";
+import { commandFailed, gitError, heldSecrets, log, logName, redactSecrets, secretForms } from "./inputs.mjs";
 import { untarAsAgent } from "./untar.mjs";
 import { entriesProblem, patchTextProblem, rawEntries } from "./handover.mjs";
 import { hunkView, hunksOf } from "./kept.mjs";
@@ -104,16 +104,36 @@ const GIT_REFUSED = /(returned error:|RPC failed; HTTP|HTTP|Client error:?.*?) 4
  * Whether a failed git network command (fetch, ls-remote, push, lfs push) got no answer from the remote, so it may go
  * again: it ended with an exit code (not timed out or killed) and nothing in its output is the remote's answer. The
  * answers: for a push, git's porcelain line for `ref` (done, or refused: rejected, a hook's decline), except git's
- * `[remote failure]`, a remote that failed to report the ref's status; for any command, an HTTP 4xx refusal
+ * `[remote failure]`, a remote that failed to report the ref's status, and a `[remote rejected]` whose reason is a server
+ * error (serverRefusal: GitHub failing on its side); for any command, an HTTP 4xx refusal
  * (GIT_REFUSED). Anything else (a dropped connection, DNS, TLS, a 5xx, a timeout of the remote) never completed. A
  * refusal git reports without a status (a missing ref, a 401's `Authentication failed`) is tried again within
  * GIT_RETRY's bound before it stands.
  */
 export function gitTransport(r, ref = null) {
   if (!r || r.code === 0 || r.timedOut || r.code == null) return false;
-  const line = ref ? String(r.stdout).split("\n").map((l) => l.split("\t")).find((f) => f[1]?.endsWith(`:${ref}`)) : null;
-  if (line) return /^\[remote failure\]/.test(String(line[2] || ""));
+  const line = ref ? refLine(r, ref) : null;
+  if (line) return /^\[remote failure\]/.test(String(line[2] || "")) || !!serverRefusal(r, ref);
   return !GIT_REFUSED.test(`${r.stdout}\n${r.stderr}`);
+}
+
+/** git's porcelain line for `ref` in a push's output, split at its tabs, or undefined. */
+const refLine = (r, ref) => String(r?.stdout ?? "").split("\n").map((l) => l.split("\t")).find((f) => f[1]?.endsWith(`:${ref}`));
+
+/** The reason phrases of the HTTP 5xx statuses a server failing on its side answers with, as GitHub puts them on a ref. */
+const SERVER_PHRASES = { "Internal Server Error": 500, "Not Implemented": 501, "Bad Gateway": 502, "Service Unavailable": 503, "Gateway Timeout": 504 };
+
+/**
+ * The server error ("HTTP 500") a push's `ref` was refused with, when its porcelain line is `[remote rejected]` with a
+ * reason that is exactly a 5xx reason phrase (`(Internal Server Error)`) or names an HTTP 5xx status (`(HTTP 503)`,
+ * `(500 Internal Server Error)`): GitHub failing on its side, which a later try may pass. Else null: every other reason
+ * (a rule, a hook, a protected branch) is GitHub's answer.
+ */
+export function serverRefusal(r, ref) {
+  const m = /^\[remote rejected\] \((.*)\)$/.exec(String(refLine(r, ref)?.[2] ?? "").trim());
+  if (!m) return null;
+  const status = SERVER_PHRASES[m[1]] ?? Number(/^(?:HTTP )?(5\d\d)(?: [A-Za-z ]+)?$/.exec(m[1])?.[1]);
+  return status ? `HTTP ${status}` : null;
 }
 
 /**
@@ -296,8 +316,12 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
   const remoteOrigin = networkOrigin;
   const net = async (what, args, { ref = null, landed = null } = {}) => {
     let end = Math.min(RETRY.now() + GIT_RETRY.maxWaitMs, stageEnd());
+    // When a push first met GitHub failing on its side (serverRefusal), on OUTAGE's clock: the outage's start.
+    let serverSince = null;
     for (let n = 1; ; n += 1) {
       const r = await git(args);
+      if (ref && serverRefusal(r, ref)) serverSince ??= OUTAGE.now();
+      r.serverSince = serverSince;
       if (r.code !== 0 && remoteOrigin && (waitingOutages() || stoppedWaiting()) && gitTransport(r, ref)) {
         const down = await unreachableNow([remoteOrigin]);
         // Stopped waiting: the stage ends on the outage (NetworkDown), never on a push refused for it.
@@ -373,11 +397,10 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     git,
     // The identity of the merge commits Pendulum makes in the mirror (catchUp); the stage sets its bot's.
     author: { name: "pendulum[bot]", email: "pendulum[bot]@users.noreply.github.com" },
-    // Set by the last push: Pendulum's merge of the default branch ({default, paths}), a conflict with it, the raw text of
-    // a rejected push (for the job log only), and whether the checkout took the merge.
+    // Set by the last push: Pendulum's merge of the default branch ({default, paths}), a conflict with it, and whether
+    // the checkout took the merge.
     merged: null,
     conflict: null,
-    detail: "",
     synced: true,
     // Why the last push's Git LFS hand-over (its catch-up merge, or the default branch it conflicts with) fell short, or "".
     lfsWarning: "",
@@ -1573,10 +1596,9 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     await holdIfStopped();
     await box.beforePush?.();
     if (box.failed) return false;
-    // What this push did, never an earlier one's: Pendulum's merge, a conflict, GitHub's text, whether the checkout took it.
+    // What this push did, never an earlier one's: Pendulum's merge, a conflict, whether the checkout took it.
     box.merged = null;
     box.conflict = null;
-    box.detail = "";
     box.synced = true;
     box.lfsWarning = "";
     let head;
@@ -1708,13 +1730,21 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     const done = String(r.stdout).split("\n").some((l) => /^[ +*=-]\t/.test(l) && l.split("\t")[1]?.endsWith(`:refs/heads/${branch}`)) || (r.code !== 0 && (await serverHead(branch).catch(() => "")) === head);
     if (r.code !== 0 && !done) {
       const out = String(`${r.stdout}\n${r.stderr}`).split("\n");
-      // GitHub's own text (the remote's URL, its `remote:` lines, ruleset or push-protection messages) is for the job
-      // log only: the Blocked reason is Pendulum's fixed text and codes (pushRefusal).
-      box.detail = out.filter((l) => /rejected|error|fatal|!|workflow/.test(l)).join("; ").slice(0, 600);
+      // GitHub's own text (its `remote:` lines, the ref's porcelain line with its reason, git's errors) goes to the log
+      // here, on every stage's path, secrets redacted (log): the Blocked reason is Pendulum's fixed text and codes
+      // (pushRefusal), which points at this line.
+      const said = out.map((l) => l.trim()).filter((l) => l && l !== "Done" && !/^To /.test(l));
+      // Redacted before it is cut, so a cut never leaves part of a held secret.
+      log(`git push of refs/heads/${branch} refused (exit ${r.code}): ${said.length ? redactSecrets(said.join(" | ")).slice(0, 2000) : "git printed nothing"}`);
+      // GitHub failing on its side (a 5xx on the ref's line) past the retries is its outage, not a refusal: the stage
+      // ends on it as on a GitHub API 5xx past the client's retries (github.mjs outlasted), paused locally, and Blocks
+      // only past the outage bounds (network.mjs).
+      const failed = serverRefusal(r, `refs/heads/${branch}`);
+      if (failed && remoteOrigin) throw Object.assign(new Error(`git push of refs/heads/${branch}: ${new URL(remoteOrigin).host} answered ${failed} to every try`), { offline: true, origin: remoteOrigin, code: failed, since: r.serverSince ?? OUTAGE.now(), endpoint: "git push" });
       // GitHub's refusal of a workflow file the token may not write, read only from its own reason on this ref's
       // porcelain line: named with its cause, in Pendulum's own words. Anything else is a plain refusal.
       if (out.some((l) => workflowScopeRefused(l, branch))) return refuse(workflowScopeReason({ branch, defaultBranch, ...(await workflowDrift(head).catch(() => ({}))) }));
-      return refuse(pushRefusal({ branch, out, code: r.code }));
+      return refuse(pushRefusal({ branch, out, code: r.code, where: logName() }));
     }
     // GitHub's head must now be exactly the commit Pendulum checked. Its reads lag a push at times: five reads over about
     // 30 s (each ls-remote retried on its own network failures); past the stage's real end, still the first three.
