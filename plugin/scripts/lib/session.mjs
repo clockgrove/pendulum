@@ -3646,9 +3646,9 @@ export function queueRedRecords(comments, issue) {
   return [...byAt.values()].sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
 }
 
-/** Whether a record is of the drop at `at` (the timeline's time, to the minute as the requeue records match). */
 /** The kinds of a queue red (queueRedOf) that are GitHub's side, not the checks': an outage. */
 const QUEUE_OUTAGE_KINDS = ["infra", "not-started"];
+/** Whether a record is of the drop at `at` (the timeline's time, to the minute as the requeue records match). */
 const sameDrop = (a, b) => Math.abs(Date.parse(a) - Date.parse(b)) <= 60_000;
 
 /** Write (or update) the record of the drop at `rec.at` on the issue. */
@@ -4525,7 +4525,13 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
     // outage: it counts toward no try, up to QUEUE_OUTAGE_MAX (queueRetry `outage`).
     const redDrop = (r) => !r.self && String(r.reason || "").toLowerCase() === QUEUE_RED_CODE;
     if (removals.some(redDrop)) {
-      const outages = queueRedRecords(await listComments(repo, issue, opts).catch(() => []), issue).filter((x) => x.state === "requeued" && QUEUE_OUTAGE_KINDS.includes(x.kind));
+      let unread = null;
+      const comments = await listComments(repo, issue, opts).catch((e) => ((unread = e), null));
+      if (unread) {
+        log(`#${issue}: its comments are unreadable (${errCode(unread)}); next tick`);
+        return "pending";
+      }
+      const outages = queueRedRecords(comments, issue).filter((x) => x.state === "requeued" && QUEUE_OUTAGE_KINDS.includes(x.kind));
       for (const r of removals) if (redDrop(r) && outages.some((x) => sameDrop(x.at, r.at))) r.outage = true;
     }
     retry = queueRetry(removals, { since, self });
@@ -4602,7 +4608,7 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
           : retry.block;
       return "dropped";
     }
-    if (retry.drops || retry.cleared) log(`#${issue}: the merge queue dropped PR #${prNumber} since its review, head or re-entry; enqueuing it again (try ${retry.drops + (retry.cleared || 0) + 1})`);
+    if (retry.drops || retry.cleared || retry.outages) log(`#${issue}: the merge queue dropped PR #${prNumber} since its review, head or re-entry; enqueuing it again (try ${retry.drops + (retry.cleared || 0) + (retry.outages || 0) + 1}${retry.outages ? `, ${retry.outages} of them GitHub's side, counted as no try` : ""})`);
   }
   // A review conversation the merge would be refused for, read structurally before the merge rather than from GitHub's
   // refusal: a thread the answer pass takes goes to it, any other Blocks naming it (conversationsGate).
@@ -4644,8 +4650,8 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
     report.watch = true;
     // A re-enqueue is said on the issue (codes and times), so a drop is visible before any Block.
     // Its try counts every removal Pendulum put it back after, a cleared one included, so no notice takes another's place.
-    if ((retry?.drops || retry?.cleared) && retry.last) {
-      const tryNo = retry.drops + (retry.cleared || 0) + 1;
+    if ((retry?.drops || retry?.cleared || retry?.outages) && retry.last) {
+      const tryNo = retry.drops + (retry.cleared || 0) + (retry.outages || 0) + 1;
       await upsertComment(repo, issue, marker(issue, "requeue", String(tryNo)), requeueBody(issue, prNumber, retry.last, tryNo, lastHung), opts).catch((e) => log(`#${issue}: re-enqueue notice: ${errCode(e)}`));
     }
   }

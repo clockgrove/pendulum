@@ -1237,6 +1237,11 @@ test("#682 triage: an LFS batch timeout in the checkout, with an always() upload
     const t = openTriage({ inputs: {}, env: {}, repo: repo165, issue: 1, prNumber: 2, token: "t", decider: asking({ verdict: "flaky_or_infra", confidence: 0.99 }), progress: async () => {} });
     assert.equal(await t.infra({ sha: "d".repeat(40), failedRuns: runs, required: ["quality"] }), true);
   });
+  // A late required job with a failure line of its own is no aggregate of the others: the change's, not GitHub's.
+  await withHead({ runs: [], jobs: { 901: job, 903: { ...testFailed, id: 903, name: "quality" } }, logs: { 901: log, 903: "##[group]Run npm test\nAssertionError [ERR_ASSERTION]: 1 !== 2\n##[error]Process completed with exit code 1." }, workflow: yml }, async () => {
+    const t = openTriage({ inputs: {}, env: {}, repo: repo165, issue: 1, prNumber: 2, token: "t", decider: asking({ verdict: "flaky_or_infra", confidence: 0.99 }), progress: async () => {} });
+    assert.equal(await t.infra({ sha: "d".repeat(40), failedRuns: [runs[0], { ...runs[1], id: 903 }], required: ["quality"] }), false);
+  });
   // Such a drop is an outage, not a try: two of them still enqueue the PR again.
   const { queueRetry } = await import("../scripts/lib/logic.mjs");
   const drop = (at) => ({ at, reason: "failed_checks", actor: "github-merge-queue", outage: true });

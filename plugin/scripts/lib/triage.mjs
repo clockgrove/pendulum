@@ -564,8 +564,11 @@ export function setupFailure(job, workflow = null) {
   const unpassed = steps.filter((x) => !["success", "skipped"].includes(x?.conclusion));
   if (unpassed.every(kind)) return kind(failed[0]);
   if (unpassed[0] !== failed[0] || !kind(failed[0])) return null;
+  // Only a failure before any checkout succeeded: no code of the change is on disk for a later step to run.
+  if (steps.some((x) => x.number < failed[0].number && x.conclusion === "success" && (checkout ??= checkoutSteps(workflow, job.name)).has(x.name))) return null;
   const written = workflowSteps(workflow, job.name);
-  const stops = failed[0].number === 1 || written.some((st) => typeof st.uses === "string" && usesName(st) === failed[0].name && (st["continue-on-error"] ?? false) === false);
+  const named = written.filter((st) => typeof st.uses === "string" && usesName(st) === failed[0].name);
+  const stops = failed[0].number === 1 || (named.length > 0 && named.every((st) => (st["continue-on-error"] ?? false) === false));
   const afterFailure = new Set(written.filter((st) => typeof st.name === "string" && typeof st.if === "string" && /\b(?:always|failure)\(\)/.test(st.if)).map((st) => st.name));
   return stops && unpassed.slice(1).every((x) => x.conclusion === "failure" && (kind(x) || afterFailure.has(x.name))) ? kind(failed[0]) : null;
 }
@@ -1707,17 +1710,19 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
   };
   // Whether every failed job failed on GitHub's side (githubSide): its set-up or checkout only, a server or network
   // failure, pointing at no file the PR changes. Read one job at a time, up to the first that did not. A required
-  // aggregate of the others (isAggregate, on `required`) is red only because they are, and goes with them.
+  // aggregate of the others (isAggregate, on `required`) whose own log has no failure line is red only because they
+  // are, and goes with them (as in jobsToTriage).
   const infra = async ({ sha, failedRuns = [], required = [] }) => {
     if (!failedRuns.length) return false;
     const { names } = await prNames();
     let read = 0;
-    for (const r of failedRuns.filter((x) => !isAggregate(x, failedRuns, required))) {
+    for (const r of failedRuns) {
       const job = await actionsJobOf(r);
       if (!job) return false;
       // A leg fail-fast stopped goes with the leg that failed (checkCancel).
       if ((await cancelOf(sha, r, job, failedRuns))?.after) continue;
       const { text, sig } = await readJob(r);
+      if (isAggregate(r, failedRuns, required) && !sig.lines.length) continue;
       if (!(await githubSide(sha, job, text, sig, names))) return false;
       read += 1;
     }

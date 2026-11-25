@@ -2276,7 +2276,8 @@ export const CONFLICT_CODE = "merge_conflict";
  *   drop: it counts as `cleared`, never toward QUEUE_TRIES or as a hold. Only the first QUEUE_CLEARED_MAX of those
  *   since `since` are cleared; any later one counts as a drop, so a step that is slow on every try still Blocks;
  * - the queue itself for a red run the review stage read as GitHub's side (`outage`: session.mjs marks it from its
- *   record of that drop) is `cleared` the same way, the first QUEUE_OUTAGE_MAX of them: an outage waits, a flake counts;
+ *   record of that drop) counts toward no try the same way, the first QUEUE_OUTAGE_MAX of them (`outages`, their count,
+ *   apart from `cleared`): an outage waits, a flake counts;
  * - a person's account (`person`: only writers can dequeue): a hold. When the newest removal is a hold, Pendulum leaves
  *   the PR out (`{hold}`) until a person enqueues it again or a new review, head, re-entry or Block moves `since`;
  * - the queue itself (`github-merge-queue`) or any other bot: a drop, with GitHub's reason code, except a removal for a
@@ -2308,7 +2309,7 @@ export function queueRetry(removals, { since, self = null }) {
       }
       const drop = r.person !== true || who === QUEUE_BOT;
       const code = queueCode(r.reason);
-      if (drop && r.outage === true && outages++ < QUEUE_OUTAGE_MAX) return { at: r.at, code, drop: false, cleared: true };
+      if (drop && r.outage === true && outages++ < QUEUE_OUTAGE_MAX) return { at: r.at, code, drop: false, cleared: true, outage: true };
       return drop && code === CONFLICT_CODE ? { at: r.at, code, drop: false, conflict: true } : { at: r.at, code, drop };
     });
   const newest = after.at(-1);
@@ -2318,7 +2319,8 @@ export function queueRetry(removals, { since, self = null }) {
   const tried = after.filter((r) => r.drop || r.cleared);
   const n = tried.at(-1);
   const last = n ? { at: n.at, code: n.code, ...(n.pendulum ? { pendulum: true } : {}), ...(n.cleared ? { cleared: true } : {}) } : null;
-  const cleared = tried.length - drops.length ? { cleared: tried.length - drops.length } : {};
+  const outageN = tried.filter((r) => r.outage).length;
+  const cleared = { ...(tried.length - drops.length - outageN ? { cleared: tried.length - drops.length - outageN } : {}), ...(outageN ? { outages: outageN } : {}) };
   if (drops.length < QUEUE_TRIES) return { enqueue: true, drops: drops.length, last, ...cleared };
   const codes = [...new Set(drops.map((d) => d.code))];
   return { block: `the merge queue dropped the reviewed PR ${drops.length} times without merging it (${codes.join(", ")}); Pendulum re-enqueued it once. Check that the required checks run on the queue's merge_group commits`, drops: drops.length, last, codes, ...cleared };
