@@ -18,7 +18,7 @@ import { agentUser, exec, runnerCommand, sudoEnv } from "./proc.mjs";
 import { RETRY } from "./github.mjs";
 import { UsageLimitReached } from "./harness.mjs";
 import { NetworkDown, OUTAGE, downFor, gitProxyEnv, networkBack, originOf, stoppedWaiting, unreachableNow, waitingOutages } from "./network.mjs";
-import { commandFailed, gitError, heldSecrets, log, logName, secretForms } from "./inputs.mjs";
+import { commandFailed, gitError, heldSecrets, log, logName, redactSecrets, secretForms } from "./inputs.mjs";
 import { untarAsAgent } from "./untar.mjs";
 import { entriesProblem, patchTextProblem, rawEntries } from "./handover.mjs";
 import { hunkView, hunksOf } from "./kept.mjs";
@@ -316,8 +316,12 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
   const remoteOrigin = networkOrigin;
   const net = async (what, args, { ref = null, landed = null } = {}) => {
     let end = Math.min(RETRY.now() + GIT_RETRY.maxWaitMs, stageEnd());
+    // When a push first met GitHub failing on its side (serverRefusal), on OUTAGE's clock: the outage's start.
+    let serverSince = null;
     for (let n = 1; ; n += 1) {
       const r = await git(args);
+      if (ref && serverRefusal(r, ref)) serverSince ??= OUTAGE.now();
+      r.serverSince = serverSince;
       if (r.code !== 0 && remoteOrigin && (waitingOutages() || stoppedWaiting()) && gitTransport(r, ref)) {
         const down = await unreachableNow([remoteOrigin]);
         // Stopped waiting: the stage ends on the outage (NetworkDown), never on a push refused for it.
@@ -1730,12 +1734,13 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
       // here, on every stage's path, secrets redacted (log): the Blocked reason is Pendulum's fixed text and codes
       // (pushRefusal), which points at this line.
       const said = out.map((l) => l.trim()).filter((l) => l && l !== "Done" && !/^To /.test(l));
-      log(`git push of refs/heads/${branch} refused (exit ${r.code}): ${said.length ? said.join(" | ").slice(0, 2000) : "git printed nothing"}`);
+      // Redacted before it is cut, so a cut never leaves part of a held secret.
+      log(`git push of refs/heads/${branch} refused (exit ${r.code}): ${said.length ? redactSecrets(said.join(" | ")).slice(0, 2000) : "git printed nothing"}`);
       // GitHub failing on its side (a 5xx on the ref's line) past the retries is its outage, not a refusal: the stage
       // ends on it as on a GitHub API 5xx past the client's retries (github.mjs outlasted), paused locally, and Blocks
       // only past the outage bounds (network.mjs).
       const failed = serverRefusal(r, `refs/heads/${branch}`);
-      if (failed && remoteOrigin) throw Object.assign(new Error(`git push of refs/heads/${branch}: ${new URL(remoteOrigin).host} answered ${failed} to every try`), { offline: true, origin: remoteOrigin, code: failed, since: OUTAGE.now(), endpoint: "git push" });
+      if (failed && remoteOrigin) throw Object.assign(new Error(`git push of refs/heads/${branch}: ${new URL(remoteOrigin).host} answered ${failed} to every try`), { offline: true, origin: remoteOrigin, code: failed, since: r.serverSince ?? OUTAGE.now(), endpoint: "git push" });
       // GitHub's refusal of a workflow file the token may not write, read only from its own reason on this ref's
       // porcelain line: named with its cause, in Pendulum's own words. Anything else is a plain refusal.
       if (out.some((l) => workflowScopeRefused(l, branch))) return refuse(workflowScopeReason({ branch, defaultBranch, ...(await workflowDrift(head).catch(() => ({}))) }));

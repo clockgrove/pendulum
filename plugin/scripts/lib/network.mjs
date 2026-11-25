@@ -216,6 +216,15 @@ export const githubOrigin = (env = process.env) => {
   }
 };
 
+/**
+ * Whether `origin` is GitHub's own, of the deployment githubOrigin() names: its REST origin, or its git host (the REST
+ * origin without its `api.` label: github.com for api.github.com; a GitHub Enterprise Server serves both on one origin).
+ */
+export const isGithubOrigin = (origin, env = process.env) => {
+  const api = githubOrigin(env);
+  return !!origin && (origin === api || origin === api.replace(/^(https?:\/\/)api\./, "$1"));
+};
+
 /** An origin to probe for a URL, or null (a path, a local remote). */
 export const originOf = (url) => {
   try {
