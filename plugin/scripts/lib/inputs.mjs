@@ -77,7 +77,7 @@ export const DEFAULTS = {
   cross_os_wait_minutes: "60", // how long the work stage waits for those legs on a head (lib/cross-os.mjs)
   harness_version: "latest",
   allowed_domains: "", // The harness's sandbox (Claude Code, Codex, Copilot) on Actions and in a cloud sandbox: hosts its commands may reach beyond GitHub and the npm and Yarn registries (local.mjs runnerDomains)
-  node_version: "22",
+  node_version: "24",
   project: "", // the Pendulum board's node id, recorded by setup (github.mjs findProject); empty: the board titled exactly "Pendulum: <repo>"
   action: `clockgrove/pendulum@v${PENDULUM_VERSION}`,
   objective_label: "pendulum:objective",
