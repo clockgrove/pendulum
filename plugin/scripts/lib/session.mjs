@@ -1732,7 +1732,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
       // Red again the same way, GitHub's side both times: every failed job, before the rerun and after, failed in its
       // set-up or checkout on a server or network failure (triage.mjs infra). A head rerun once already shows its red
       // after that rerun.
-      const isInfra = async (runs) => !!runs?.length && !!(await triage?.infra?.({ sha, failedRuns: runs }).catch(() => false));
+      const isInfra = async (runs) => !!runs?.length && !!(await triage?.infra?.({ sha, failedRuns: runs, required: checks.names }).catch(() => false));
       const infra = a.rerun ? (await isInfra(before)) && (await isInfra(r.failedRuns)) : !!a.already && (await isInfra(before));
       // The rerun's own red, when one was made: it can fail another way than the red the fix pass had (a checkout that
       // got through, then a test), and a fresh worker pass is handed that one.
@@ -3647,6 +3647,8 @@ export function queueRedRecords(comments, issue) {
 }
 
 /** Whether a record is of the drop at `at` (the timeline's time, to the minute as the requeue records match). */
+/** The kinds of a queue red (queueRedOf) that are GitHub's side, not the checks': an outage. */
+const QUEUE_OUTAGE_KINDS = ["infra", "not-started"];
 const sameDrop = (a, b) => Math.abs(Date.parse(a) - Date.parse(b)) <= 60_000;
 
 /** Write (or update) the record of the drop at `rec.at` on the issue. */
@@ -3726,7 +3728,7 @@ export async function queueRedOf({ repo, issue, prNumber, base, at, after = null
   if (!failedRuns.length) return run.status && run.status !== "completed" ? { kind: "unread", sha, reason: `no failed check run on the queue's commit ${sha.slice(0, 7)} yet` } : { kind: "none", sha, reason: `no failed check run on the queue's commit ${sha.slice(0, 7)}` };
   const stuck = await notStartedJobs({ repo, failedRuns, required: names, token, actionsToken, cache: triage?.cache ?? new Map() }).catch(() => []);
   if (stuck.length) return { kind: "not-started", sha, reason: notStartedReason(stuck) };
-  if (await triage?.infra?.({ sha, failedRuns }).catch(() => false)) return { kind: "infra", sha, reason: "every failed job failed in its set-up or checkout on GitHub's side" };
+  if (await triage?.infra?.({ sha, failedRuns, required: names }).catch(() => false)) return { kind: "infra", sha, reason: "every failed job failed in its set-up or checkout on GitHub's side" };
   // Cancelled jobs (triage.mjs redCancels), read through triage's own reads: a red that is only cancels, one of them one
   // Pendulum cannot place (`unplaced`: a person's or the API's cancel), is no flake and not known to be the PR's change,
   // so the stage Blocks (`cancelled`); one stopped at its limit gets the queue's fix pass, worded as that, never as the
@@ -4519,6 +4521,13 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
       since = queueSince([reviewedAt, head?.commit?.committer?.date ?? null, marks]);
     }
     const self = selfLogin() || (await primeSelf(opts));
+    // A failed-checks drop the review stage read as GitHub's side (its record's kind `infra` or `not-started`) is an
+    // outage: it counts toward no try, up to QUEUE_OUTAGE_MAX (queueRetry `outage`).
+    const redDrop = (r) => !r.self && String(r.reason || "").toLowerCase() === QUEUE_RED_CODE;
+    if (removals.some(redDrop)) {
+      const outages = queueRedRecords(await listComments(repo, issue, opts).catch(() => []), issue).filter((x) => x.state === "requeued" && QUEUE_OUTAGE_KINDS.includes(x.kind));
+      for (const r of removals) if (redDrop(r) && outages.some((x) => sameDrop(x.at, r.at))) r.outage = true;
+    }
     retry = queueRetry(removals, { since, self });
     // At the Block: a hung removal whose step and job then finished green in time was no hang, and counts toward no try.
     if (retry.block) {

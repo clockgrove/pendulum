@@ -524,33 +524,35 @@ export function jobsToTriage(failedRuns, required = [], sigs = new Map()) {
 export const neverStarted = (job) => !!job && job.conclusion === "failure" && Array.isArray(job.steps) && job.steps.length === 0 && !job.runner_id && !job.runner_name;
 
 
+/** The steps (as written) of the workflow jobs reporting `jobName`, from the workflow file `text`; an unreadable one has none. */
+function workflowSteps(text, jobName) {
+  let doc;
+  try {
+    doc = parseYaml(String(text || ""));
+  } catch {
+    return [];
+  }
+  return Object.entries(doc?.jobs || {}).flatMap(([id, job]) => (reports(typeof job?.name === "string" ? job.name : id, jobName) && Array.isArray(job?.steps) ? job.steps.filter((st) => st && typeof st === "object") : []));
+}
+
+/** The name GitHub gives a `uses:` step: its `name`, else `Run <uses>`. */
+const usesName = (st) => (typeof st.name === "string" ? st.name : `Run ${String(st.uses).trim()}`);
+
 /**
  * The names GitHub gives the checkout steps (`uses: actions/checkout@…`) of the workflow job reporting `jobName`: the
  * step's `name`, else `Run <uses>`. `text` is the workflow file at the head; an unreadable one has none.
  */
 export function checkoutSteps(text, jobName) {
-  let doc;
-  try {
-    doc = parseYaml(String(text || ""));
-  } catch {
-    return new Set();
-  }
-  const out = new Set();
-  for (const [id, job] of Object.entries(doc?.jobs || {})) {
-    if (!reports(typeof job?.name === "string" ? job.name : id, jobName) || !Array.isArray(job?.steps)) continue;
-    for (const st of job.steps) {
-      const uses = typeof st?.uses === "string" ? st.uses.trim() : "";
-      if (/^actions\/checkout@/.test(uses)) out.add(typeof st.name === "string" ? st.name : `Run ${uses}`);
-    }
-  }
-  return out;
+  return new Set(workflowSteps(text, jobName).filter((st) => typeof st.uses === "string" && /^actions\/checkout@/.test(st.uses.trim())).map(usesName));
 }
 
 /**
  * Whether a job that ran failed only where no code of the change runs: "set-up" when its first failed step is GitHub's
  * own first step (Set up job), "checkout" when it is a checkout step of its workflow (checkoutSteps, `workflow` the file
- * at the head), and every other failed step is one of those too; else null (a `run:` step or anything else failed).
- * Structure only: step numbers, conclusions and the workflow's `uses`, never the log.
+ * at the head); and every other failed step is one of those too, or ran only because that one failed: a set-up failure,
+ * or a checkout without `continue-on-error`, ends the job's normal steps, and a named step whose `if:` says always() or
+ * failure() runs after it (an upload of files the job never made, say). Else null (a `run:` step or anything else
+ * failed). Structure only: step numbers, conclusions and the workflow's steps, never the log.
  */
 export function setupFailure(job, workflow = null) {
   const steps = Array.isArray(job?.steps) ? job.steps : [];
@@ -558,9 +560,14 @@ export function setupFailure(job, workflow = null) {
   if (!failed.length) return null;
   let checkout = null;
   const kind = (x) => (x.number === 1 ? "set-up" : (checkout ??= checkoutSteps(workflow, job.name)).has(x.name) ? "checkout" : null);
-  // Every step that did not pass or skip (a later step cancelled after a `continue-on-error` checkout included) must
-  // be the set-up or a checkout.
-  return steps.filter((x) => !["success", "skipped"].includes(x?.conclusion)).every(kind) ? kind(failed[0]) : null;
+  // Every step that did not pass or skip (a later step cancelled after a `continue-on-error` checkout included).
+  const unpassed = steps.filter((x) => !["success", "skipped"].includes(x?.conclusion));
+  if (unpassed.every(kind)) return kind(failed[0]);
+  if (unpassed[0] !== failed[0] || !kind(failed[0])) return null;
+  const written = workflowSteps(workflow, job.name);
+  const stops = failed[0].number === 1 || written.some((st) => typeof st.uses === "string" && usesName(st) === failed[0].name && (st["continue-on-error"] ?? false) === false);
+  const afterFailure = new Set(written.filter((st) => typeof st.name === "string" && typeof st.if === "string" && /\b(?:always|failure)\(\)/.test(st.if)).map((st) => st.name));
+  return stops && unpassed.slice(1).every((x) => x.conclusion === "failure" && (kind(x) || afterFailure.has(x.name))) ? kind(failed[0]) : null;
 }
 
 // What only the log says: whether the failed step's far side failed or could not be reached (an HTTP 5xx, a timeout,
@@ -577,6 +584,8 @@ const SERVER_SIDE = [
   /\bCould not resolve host\b/i,
   /\bconnection (?:reset|refused|timed out)\b/i,
   /\bearly EOF\b|\bRPC failed\b|\bunexpected disconnect\b/i,
+  // GitHub's own timeout page (its LFS batch API's "Fatal error: We couldn't respond to your request in time").
+  /\bcouldn['’]t respond to your request in time\b/i,
 ];
 const CLIENT_SIDE = [
   /\bHTTP(?:\/[\d.]+)? 4\d\d\b/i,
@@ -1697,12 +1706,13 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
     return { rerun: true, ignoreIds: new Set(failedRuns.map((r) => r.id)), jobs: failedRuns.map((r) => r.name) };
   };
   // Whether every failed job failed on GitHub's side (githubSide): its set-up or checkout only, a server or network
-  // failure, pointing at no file the PR changes. Read one job at a time, up to the first that did not.
-  const infra = async ({ sha, failedRuns = [] }) => {
+  // failure, pointing at no file the PR changes. Read one job at a time, up to the first that did not. A required
+  // aggregate of the others (isAggregate, on `required`) is red only because they are, and goes with them.
+  const infra = async ({ sha, failedRuns = [], required = [] }) => {
     if (!failedRuns.length) return false;
     const { names } = await prNames();
     let read = 0;
-    for (const r of failedRuns) {
+    for (const r of failedRuns.filter((x) => !isAggregate(x, failedRuns, required))) {
       const job = await actionsJobOf(r);
       if (!job) return false;
       // A leg fail-fast stopped goes with the leg that failed (checkCancel).
