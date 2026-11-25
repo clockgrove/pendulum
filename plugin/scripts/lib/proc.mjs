@@ -370,8 +370,31 @@ function fileStdio(limit) {
  * prints its answer as it arrives, `answerStreams`, printed nothing), and reported `idle`, with `idleOpen` the items
  * open at the kill. `dropLine`: stdout lines that count as output for that check and are not kept, teed or handed to
  * `onLine` (a harness's answer deltas).
+ * A launch of srt that fails with ENOENT while srt is off the launch's PATH (a reinstall relinks it) waits for srt
+ * (SRT_GONE), then launches again with what is left of `timeoutMs`.
  */
-export function exec(cmd, args, { cwd, env, input, timeoutMs, tee, echo = false, encoding = "utf8", maxBytes = 512 * 1024 * 1024, killPastMax = false, onLine = null, dropLine = null, idleMs = 0, openItems = null, answerStreams = false, harnessHome = null, agentExtra = [], group = false, record = null, signal = null, fileStdio: toFiles = false } = {}) {
+export async function exec(cmd, args, opts = {}) {
+  const startedAt = Date.now();
+  let since = null;
+  for (;;) {
+    const timeoutMs = since !== null && opts.timeoutMs > 0 ? Math.max(1, opts.timeoutMs - (Date.now() - startedAt)) : opts.timeoutMs;
+    try {
+      return await execOnce(cmd, args, { ...opts, timeoutMs });
+    } catch (e) {
+      const env = opts.env ?? process.env;
+      if (cmd !== "srt" || e?.code !== "ENOENT" || !SRT_GONE.wait || whichSync("srt", env)) throw e;
+      since = await SRT_GONE.wait(env, since);
+    }
+  }
+}
+
+/**
+ * A process's wait for srt gone from a launch's PATH (harness.mjs srtBack): called with the launch's env and the wait's
+ * first start (null at the first miss), it resolves with that start once srt is back, or throws. Null: exec's failure stands.
+ */
+export const SRT_GONE = { wait: null };
+
+function execOnce(cmd, args, { cwd, env, input, timeoutMs, tee, echo = false, encoding = "utf8", maxBytes = 512 * 1024 * 1024, killPastMax = false, onLine = null, dropLine = null, idleMs = 0, openItems = null, answerStreams = false, harnessHome = null, agentExtra = [], group = false, record = null, signal = null, fileStdio: toFiles = false } = {}) {
   // In the agent's home, as the agent (with its own env), whoever asked; the directory is entered as the agent.
   if (inAgentHome(cwd)) {
     if (!isSudo(cmd)) [cmd, args, env] = asAgent(cmd, args, env ?? process.env, agentExtra, cwd);

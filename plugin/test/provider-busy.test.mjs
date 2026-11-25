@@ -3,7 +3,7 @@
 // fresh try; a vanished work job is placed from its own steps. All decided on structure: statuses, kinds, steps.
 import "./temp.mjs";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -240,20 +240,32 @@ test("endedNotLost: the work job's conclusion and steps place a vanished stage, 
   assert.equal(endedNotLost({ job: null }), null);
 });
 
+// A fake srt: its version at the floor; a launch runs what follows `--` (its `env` and assignments applied in the shell).
+const FAKE_SRT = `#!/bin/sh
+if [ "$1" = --version ]; then echo 0.0.83; exit 0; fi
+while [ "$1" != -- ]; do shift; done; shift
+[ "$1" = env ] && shift
+while case "$1" in *=*) true ;; *) false ;; esac; do export "$1"; shift; done
+exec "$@"
+`;
+
 // #666: srt missing for a moment mid-stage (a reinstall relinks it) is waited out in place, never a crash.
 test("runHarness, real, fake srt: a launch that finds srt gone waits for it at its floor, then the pass runs", async () => {
   const { bin, calls } = fakeCodex([null]);
   const srtDir = mkdtempSync(join(tmpdir(), "pendulum-srt-"));
-  const srt = `#!/bin/sh\nif [ "$1" = --version ]; then echo 0.0.83; exit 0; fi\nwhile [ "$1" != -- ]; do shift; done\nshift\nexec "$@"\n`;
-  await inStage(bin, async ({ waits }) => {
-    waitOutages({ until: (since) => since + OUTAGE.stageWaitMs });
-    const sleep = OUTAGE.sleep;
-    // srt comes back during the second wait.
-    OUTAGE.sleep = async (ms) => (await sleep(ms), waits.length === 2 && writeFileSync(join(srtDir, "srt"), srt, { mode: 0o755 }));
-    const env = { HOME: process.env.HOME, PATH: `${srtDir}:${bin}:/usr/bin:/bin`, PENDULUM_LOCAL_SRT: "srt.json", PENDULUM_LOCAL_SRT_HARNESS: "outer.json" };
-    const rec = await runHarness(pass(bin, { env }));
-    assert.deepEqual(waits, [5_000, 10_000]);
-    assert.equal(calls().length, 1);
-    assert.equal(rec.ok, true);
-  });
+  try {
+    await inStage(bin, async ({ waits }) => {
+      waitOutages({ until: (since) => since + OUTAGE.stageWaitMs });
+      const sleep = OUTAGE.sleep;
+      // srt comes back during the second wait.
+      OUTAGE.sleep = async (ms) => (await sleep(ms), waits.length === 2 && writeFileSync(join(srtDir, "srt"), FAKE_SRT, { mode: 0o755 }));
+      const env = { HOME: process.env.HOME, PATH: `${srtDir}:${bin}`, PENDULUM_LOCAL_SRT: "srt.json", PENDULUM_LOCAL_SRT_HARNESS: "outer.json" };
+      const rec = await runHarness(pass(bin, { env }));
+      assert.deepEqual(waits, [5_000, 10_000]);
+      assert.equal(calls().length, 1);
+      assert.equal(rec.ok, true);
+    });
+  } finally {
+    rmSync(srtDir, { recursive: true, force: true });
+  }
 });

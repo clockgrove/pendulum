@@ -8,7 +8,7 @@ import { homedir, tmpdir } from "node:os";
 import { appendOwn, dropOwned, writeNew, writeOwn } from "./fsafe.mjs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { agentUser, asAgent, exec, harnessHome, onPath, sudoEnv, whichSync } from "./proc.mjs";
+import { SRT_GONE, agentUser, asAgent, exec, harnessHome, onPath, sudoEnv, whichSync } from "./proc.mjs";
 import { readAgentFiles } from "./handoff.mjs";
 import { CLAUDE_DECOY_LAUNCH, CLAUDE_PROBE_RESULT, claudeProbeDriver } from "./claude-local-probe.mjs";
 import { asClaudeAgent, agentServicePorts, archiveSession, captureSession, capturedSession, keepSession, realRoots, resetClaudeState, writeEnvFile, restoreRunnerGit, runnerEnv, runnerLaunch, runnerLayout } from "./claude-runner.mjs";
@@ -866,7 +866,7 @@ export async function claudeLocalCheck(local, outer, runEnv, { drop = [], run = 
       const probeEnvs = { ...env, ...c.env, CLAUDE_CONFIG_DIR: config, PENDULUM_CLAUDE_PROBE: driver, PENDULUM_PROBE_SCRIPT: CONFINEMENT_PROBE, [PROBE_MARKER]: marker };
       const launch = [process.execPath, script, "/bin/sh", "-c", CLAUDE_DECOY_LAUNCH, "sh", ...args];
       const [cmd, argv] = outer ? ["srt", ["-s", outer, "--", "env", `TMPDIR=${tmp}`, ...launch]] : [launch[0], launch.slice(1)];
-      const r = await run(cmd, argv, { cwd: local.clone, env: probeEnvs, input: "Run the one command you are given.", timeoutMs: 180_000, fileStdio: true }).catch((err) => ({ code: null, stdout: "", stderr: err.message }));
+      const r = await run(cmd, argv, { cwd: local.clone, env: probeEnvs, input: "Run the one command you are given.", timeoutMs: 180_000, fileStdio: true }).catch(probeLaunchFailed);
       let text = "";
       try {
         text = readFileSync(result, "utf8");
@@ -950,7 +950,7 @@ export async function copilotLocalCheck(local, outer, runEnv, { drop = [], run =
       const marker = probeMarker();
       const ctmp = freshCopilotTmp(local) || probe.agentTmp;
       const args = ["-s", outer, "--", "env", `TMPDIR=${ctmp}`, process.execPath, script, "/bin/sh", "-c", COPILOT_DECOY_LAUNCH, "sh", ...flags];
-      const r = await run("srt", args, { cwd: local.clone, env: { ...env, ...probeEnv(probe, marker, offListHost(local.domains), local.toolchain || null, relay) }, input: "Run the one command you are given.", timeoutMs: 180_000, fileStdio: true }).catch((err) => ({ code: null, stdout: "", stderr: err.message }));
+      const r = await run("srt", args, { cwd: local.clone, env: { ...env, ...probeEnv(probe, marker, offListHost(local.domains), local.toolchain || null, relay) }, input: "Run the one command you are given.", timeoutMs: 180_000, fileStdio: true }).catch(probeLaunchFailed);
       const got = await probeResult(probe, env);
       if (got.code === 4 && got.said === RELAY_RULE) throw new GitRefusal("relay", "the gateway relay's forwarder did not come up in Copilot's sandbox", { harness: "copilot", local: true });
       if (got.code === 4) throw new GitRefusal("sandbox", got.said === TOOLCHAIN_RULE ? toolchainRefused(local.toolchain) : `Copilot's sandbox does not confine: ${got.said.slice(0, 200)}`, { rule: ruleOf(got.said), harness: "copilot", local: true });
@@ -1215,43 +1215,58 @@ async function runBusy(opts) {
 }
 
 /**
- * A pass's launch (proc.mjs exec). Its launch through srt, local mode's outer sandbox, failing with ENOENT while srt is
- * not on the launch's PATH is srt missing for a moment (a reinstall relinks it), no crash: the stage keeps its claim and
- * work and waits in place (srtBack), then launches again. Any other launch failure stands.
+ * Wait for srt to come back on `env`'s PATH (proc.mjs SRT_GONE: a launch of srt, the harness's, its sandbox probe's or a
+ * repository command's, that failed with ENOENT while srt was off the PATH, as when a reinstall relinks it). The stage
+ * keeps its claim and work and waits in place to its bound for a wait (network.mjs waitBound, OUTAGE.stageWaitMs locally)
+ * from `since`, the launch's first miss (now when null), probing after each of OUTAGE.probeMs (the last repeated) until
+ * `srt --version` reads SRT_FLOOR or later; it resolves with `since`. A stop meanwhile parks the stage. Past the bound,
+ * or in a process that does not wait, it throws GitRefusal `srt`: the stage Blocks naming the reinstall (local.mjs
+ * gitRefusalReason). Once given up, a later miss checks srt once and throws at once while it is still not back.
  */
-async function launchPass(label, cmd, args, opts) {
-  for (;;) {
-    try {
-      return await exec(cmd, args, opts);
-    } catch (e) {
-      if (cmd !== "srt" || e?.code !== "ENOENT" || whichSync("srt", opts.env)) throw e;
-      await srtBack(opts.env, label);
-    }
-  }
-}
-
-/**
- * Wait for srt to come back on `env`'s PATH: from now to the stage's bound for a wait in place (network.mjs waitBound,
- * OUTAGE.stageWaitMs locally), probing after each of OUTAGE.probeMs (the last repeated) until `srt --version` reads
- * SRT_FLOOR or later. A stop meanwhile parks the stage. Past the bound, or in a process that does not wait, it throws
- * GitRefusal `srt`: the stage Blocks naming the reinstall (local.mjs gitRefusalReason).
- */
-async function srtBack(env, label) {
-  const since = OUTAGE.now();
-  const bound = waitBound(since);
+let srtGivenUp = false;
+async function srtBack(env, since = null) {
   const floor = SRT_FLOOR.join(".");
-  log(`${label}: srt is missing (spawn srt ENOENT)${bound === null ? "" : `; waiting for srt ${floor} or later, for up to ${minutesText(bound - since)}`}`);
+  const back = () => {
+    const version = srtVersion(() => spawnSync("srt", ["--version"], { env, encoding: "utf8", timeout: 30_000 }));
+    return srtAtFloor(version) ? version : null;
+  };
+  const first = since === null;
+  since ??= OUTAGE.now();
+  const bound = srtGivenUp ? null : waitBound(since);
+  if (first) log(`srt is missing (spawn srt ENOENT)${bound === null ? "" : `; waiting for srt ${floor} or later, for up to ${minutesText(bound - since)}`}`);
   for (let i = 0; bound !== null && OUTAGE.now() < bound; i += 1) {
     await OUTAGE.sleep(Math.min(OUTAGE.probeMs[Math.min(i, OUTAGE.probeMs.length - 1)], bound - OUTAGE.now()));
     if (stopping()) await parked();
-    const version = srtVersion(() => spawnSync("srt", ["--version"], { env, encoding: "utf8", timeout: 30_000 }));
-    if (srtAtFloor(version)) {
-      log(`${label}: srt ${version.join(".")} is back after ${minutesText(OUTAGE.now() - since)}; launching the pass again`);
-      return;
+    const version = back();
+    if (version) {
+      log(`srt ${version.join(".")} is back after ${minutesText(OUTAGE.now() - since)}; launching again`);
+      return since;
     }
   }
+  if (srtGivenUp && back()) {
+    srtGivenUp = false;
+    return since;
+  }
+  if (waitingOutages()) srtGivenUp = true;
   throw new GitRefusal("srt", `srt missing since ${logTime(since)}, and not back at ${floor} or later`, { local: true });
 }
+SRT_GONE.wait = srtBack;
+
+/** A pass's launch (proc.mjs exec); one that never started (srt not back in time: GitRefusal) ends its spend entry with a no-run record first. */
+async function launchOrEnd(metered, harness, model, label, cmd, args, opts) {
+  try {
+    return await exec(cmd, args, opts);
+  } catch (e) {
+    if (e instanceof GitRefusal) metered.end({ ...noRunUsage(harness, model), label, usd: 0, ok: false, noRun: true, error: e.message });
+    throw e;
+  }
+}
+
+/** A sandbox probe's launch failure as the probe reads it (no result); srt not back in time (GitRefusal) Blocks as it is. */
+const probeLaunchFailed = (err) => {
+  if (err instanceof GitRefusal) throw err;
+  return { code: null, stdout: "", stderr: err.message };
+};
 
 /** What a pass whose provider was busy is told when its session runs again. */
 export const BUSY_PASS_PROMPT = "Your previous run stopped because the model provider was busy. Continue the same task from where it stopped; do not redo finished steps.";
@@ -1569,7 +1584,7 @@ async function runPass({ harness, model, prompt, maxUsd, resume, agent, cwd, env
     }
   };
   // Local mode: the harness leads its own process group, named in the usage directory while it runs (proc.mjs exec `record`).
-  const r = await launchPass(label, execCmd, execArgs, { cwd, env: execEnv, input: stdin, timeoutMs, tee: eventsFile, echo: true, onLine: lines, idleMs, openItems: activity.open, answerStreams: !!HARNESS_DELTAS[harness], harnessHome: harnessHome(whichSync(cmd, childEnv) || cmd, childEnv), dropLine: HARNESS_DELTAS[harness] ? (l) => deltaLine(harness, l) : null, signal: subStop ? AbortSignal.any([signal, subStop.signal]) : signal, agentExtra, group: backend(env).name === "local", record: backend(env).name === "local" && eventsFile ? dirname(eventsFile) : null, fileStdio: true });
+  const r = await launchOrEnd(metered, harness, model, label, execCmd, execArgs, { cwd, env: execEnv, input: stdin, timeoutMs, tee: eventsFile, echo: true, onLine: lines, idleMs, openItems: activity.open, answerStreams: !!HARNESS_DELTAS[harness], harnessHome: harnessHome(whichSync(cmd, childEnv) || cmd, childEnv), dropLine: HARNESS_DELTAS[harness] ? (l) => deltaLine(harness, l) : null, signal: subStop ? AbortSignal.any([signal, subStop.signal]) : signal, agentExtra, group: backend(env).name === "local", record: backend(env).name === "local" && eventsFile ? dirname(eventsFile) : null, fileStdio: true });
   // Stopped on a sub-agent's refusal: the refusal is the run's end, not a stop by Pendulum.
   if (subRefused && r.stopped && !signal.aborted) r.stopped = false;
   await backend(env).sandbox.reap();
