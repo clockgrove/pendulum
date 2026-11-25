@@ -9,6 +9,7 @@ import { test } from "node:test";
 import { Local, REFUSED_PROBE } from "../scripts/local.mjs";
 import { RETRY, graphql, rest } from "../scripts/lib/github.mjs";
 import { gitTransport, openOutbox } from "../scripts/lib/outbox.mjs";
+import { dropHeldSecrets, holdSecrets } from "../scripts/lib/inputs.mjs";
 import { fakeProc } from "./fixtures/machine.mjs";
 
 // #168: a transient GitHub or git transport failure is retried within a bound; a create is never duplicated; a
@@ -243,6 +244,73 @@ test("outbox: a refused push (a hook's rejection, a rejected ref) is never retri
     assert.equal(await box.push(), false);
     assert.match(box.error, /^push rejected: .*remote rejected/);
     assert.deepEqual(clock.waits, [], "no retry of a refusal");
+    box.close();
+  } finally {
+    clock.restore();
+  }
+});
+
+/** The log lines written while `fn` runs (inputs.mjs log writes to stdout). */
+async function logged(fn) {
+  const lines = [];
+  const write = process.stdout.write;
+  process.stdout.write = (chunk, ...more) => (lines.push(String(chunk)), write.call(process.stdout, chunk, ...more));
+  try {
+    await fn();
+  } finally {
+    process.stdout.write = write;
+  }
+  return lines.join("");
+}
+
+test("#670: a refused push logs GitHub's message (the ref's reason and its remote: lines, secrets redacted) on the outbox's own path, which the review stage's push takes", async () => {
+  const r = repos();
+  const clock = fakeClock();
+  holdSecrets(["s3cret-value-670"]);
+  try {
+    const box = await open(r);
+    writeFileSync(join(r.origin, "hooks", "pre-receive"), "#!/bin/sh\necho 'GH013: Repository rule violations found (s3cret-value-670)' >&2\nexit 1\n", { mode: 0o755 });
+    const log = await logged(async () => assert.equal(await box.push(), false));
+    assert.match(box.error, /its message is in (this machine's|the job) log$/);
+    assert.match(log, /git push of refs\/heads\/pendulum\/1 refused \(exit 1\): .*refs\/heads\/pendulum\/1\t\[remote rejected\] \(pre-receive hook declined\)/);
+    assert.match(log, /remote: GH013: Repository rule violations found \(\*\*\*\)/);
+    assert.ok(!log.includes("s3cret-value-670"));
+    box.close();
+  } finally {
+    dropHeldSecrets();
+    clock.restore();
+  }
+});
+
+test("#670: a push GitHub rejects with a server error (remote rejected, Internal Server Error) is retried as an outage and goes through", async () => {
+  const r = repos();
+  const clock = fakeClock();
+  try {
+    const box = await open(r);
+    // GitHub failing on its side once: the ref refused with "Internal Server Error" (a proc-receive hook speaks for the
+    // branch, as GitHub's backend does), then a normal push.
+    r.run(r.origin, "config", "receive.procReceiveRefs", "refs/heads");
+    writeFileSync(
+      join(r.origin, "hooks", "proc-receive"),
+      `#!${process.execPath}
+const fs = require("node:fs");
+let buf = Buffer.alloc(0);
+const more = () => { const b = Buffer.alloc(65536); const n = fs.readSync(0, b); if (!n) process.exit(1); buf = Buffer.concat([buf, b.subarray(0, n)]); };
+const pkt = () => { while (buf.length < 4) more(); const len = parseInt(buf.subarray(0, 4).toString(), 16); if (!len) { buf = buf.subarray(4); return null; } while (buf.length < len) more(); const s = buf.subarray(4, len).toString(); buf = buf.subarray(len); return s; };
+const send = (s) => fs.writeSync(1, s === null ? "0000" : (s.length + 4).toString(16).padStart(4, "0") + s);
+while (pkt() !== null);
+send("version=1\\0"); send(null);
+const refs = [];
+for (let l; (l = pkt()) !== null; ) refs.push(l.trim().split(" ")[2]);
+for (const ref of refs) send(\`ng \${ref} Internal Server Error\\n\`);
+send(null);
+require("node:child_process").execFileSync("git", ["config", "--unset", "receive.procReceiveRefs"]);
+`,
+      { mode: 0o755 },
+    );
+    assert.equal(await box.push(), true, box.error);
+    assert.deepEqual(clock.waits, [2000], "one retry");
+    assert.equal(r.run(r.origin, "rev-parse", "pendulum/1"), r.run(r.work, "rev-parse", "HEAD"));
     box.close();
   } finally {
     clock.restore();

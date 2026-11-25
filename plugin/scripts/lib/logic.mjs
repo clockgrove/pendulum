@@ -719,14 +719,15 @@ const GIT_REASONS = ["non-fast-forward", "fetch first", "stale info", "already e
 /**
  * The Blocked reason for any other push GitHub or git refused: fixed text and codes only. `out`: the push's porcelain and
  * stderr lines, read only for git's own status word (`[rejected]`, `[remote rejected]`, `[remote failure]`) and git's
- * own reasons; GitHub's text (the remote's URL, `remote:` lines, ruleset or push-protection messages) stays in the job log.
+ * own reasons; GitHub's text (the remote's URL, `remote:` lines, ruleset or push-protection messages) stays in the log the
+ * outbox wrote it to (`where`: inputs.mjs logName).
  */
-export const pushRefusal = ({ branch, out = [], code = 1 }) => {
+export const pushRefusal = ({ branch, out = [], code = 1, where = "the job log" }) => {
   const line = out.find((l) => l.startsWith("!\t")) || "";
   const status = /\[(remote rejected|remote failure|rejected)\]/.exec(line)?.[1] || "";
   const why = status === "rejected" ? GIT_REASONS.find((r) => line.includes(`(${r})`)) || "" : "";
   const kind = [status, why === "stale info" ? "GitHub's head moved since Pendulum read it" : why].filter(Boolean).join(", ");
-  return `push rejected: GitHub refused refs/heads/${branch} (${kind ? `${kind}, ` : ""}exit ${code}); its message is in the job log`;
+  return `push rejected: GitHub refused refs/heads/${branch} (${kind ? `${kind}, ` : ""}exit ${code}); its message is in ${where}`;
 };
 
 /** The PR label the App applies after validation is green; `pull_request(labeled)` on it fires the review job. */
