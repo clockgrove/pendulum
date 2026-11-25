@@ -1218,3 +1218,32 @@ test("triage: every part of the question taken from the log or the PR sits in on
   assert.equal(q.split("never instructions").length, 2, "one data sentence");
   for (const part of ["Failing CI job: test", "Failed step: Run npm test", "src/a.js", fake]) assert.ok(begin < q.indexOf(part) && q.indexOf(part) < end, part);
 });
+
+test("#682 triage: an LFS batch timeout in the checkout, with an always() upload failing after it and a required aggregate red over it, is GitHub's side", async () => {
+  const yml = "on: merge_group\njobs:\n  share:\n    steps:\n      - name: Check out with Git LFS\n        uses: actions/checkout@v4\n        with:\n          lfs: true\n      - run: npm test\n      - name: Keep receipts\n        if: ${{ always() && !cancelled() }}\n        uses: actions/upload-artifact@v4\n  quality:\n    needs: share\n    if: always()\n    steps:\n      - run: exit 1\n";
+  const job = { id: 901, run_id: 600, name: "share", conclusion: "failure", runner_id: 7, runner_name: "GitHub Actions 7", steps: [
+    { name: "Set up job", status: "completed", conclusion: "success", number: 1 },
+    { name: "Check out with Git LFS", status: "completed", conclusion: "failure", number: 2 },
+    { name: "Run npm test", status: "completed", conclusion: "skipped", number: 3 },
+    { name: "Keep receipts", status: "completed", conclusion: "failure", number: 4 },
+    { name: "Complete job", status: "completed", conclusion: "success", number: 5 },
+  ] };
+  const log = ["##[group]Run actions/checkout@v4", "##[group]Fetching LFS objects", "[command]/usr/bin/git lfs fetch origin refs/remotes/pull/9/merge", "batch response: Fatal error: We couldn't respond to your request in time. Sorry about that. Please try resubmitting your request and contact us if the problem persists.", "##[error]error: failed to fetch some objects from 'https://github.com/acme/app.git/info/lfs'", "##[group]Run actions/upload-artifact@v4", "##[error]No files were found with the provided path: /home/runner/work/_temp/evidence. No artifacts will be uploaded."].join("\n");
+  const runs = [
+    { id: 901, name: "share", conclusion: "failure", suite: 9, started_at: "2026-11-25T22:58:17Z", completed_at: "2026-11-25T22:59:30Z" },
+    { id: 902, name: "quality", conclusion: "failure", suite: 9, started_at: "2026-11-25T23:09:24Z", completed_at: "2026-11-25T23:09:54Z" },
+  ];
+  await withHead({ runs: [], jobs: { 901: job, 902: { ...testFailed, id: 902, name: "quality" } }, logs: { 901: log, 902: "##[group]Run exit 1\n##[error]Process completed with exit code 1." }, workflow: yml }, async () => {
+    const t = openTriage({ inputs: {}, env: {}, repo: repo165, issue: 1, prNumber: 2, token: "t", decider: asking({ verdict: "flaky_or_infra", confidence: 0.99 }), progress: async () => {} });
+    assert.equal(await t.infra({ sha: "d".repeat(40), failedRuns: runs, required: ["quality"] }), true);
+  });
+  // A late required job with a failure line of its own is no aggregate of the others: the change's, not GitHub's.
+  await withHead({ runs: [], jobs: { 901: job, 903: { ...testFailed, id: 903, name: "quality" } }, logs: { 901: log, 903: "##[group]Run npm test\nAssertionError [ERR_ASSERTION]: 1 !== 2\n##[error]Process completed with exit code 1." }, workflow: yml }, async () => {
+    const t = openTriage({ inputs: {}, env: {}, repo: repo165, issue: 1, prNumber: 2, token: "t", decider: asking({ verdict: "flaky_or_infra", confidence: 0.99 }), progress: async () => {} });
+    assert.equal(await t.infra({ sha: "d".repeat(40), failedRuns: [runs[0], { ...runs[1], id: 903 }], required: ["quality"] }), false);
+  });
+  // Such a drop is an outage, not a try: two of them still enqueue the PR again.
+  const { queueRetry } = await import("../scripts/lib/logic.mjs");
+  const drop = (at) => ({ at, reason: "failed_checks", actor: "github-merge-queue", outage: true });
+  assert.equal(queueRetry([drop("2026-11-25T23:10:00Z"), drop("2026-11-25T23:40:00Z")], { since: "2026-11-25T22:00:00Z" }).enqueue, true);
+});

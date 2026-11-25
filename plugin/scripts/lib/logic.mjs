@@ -2196,6 +2196,8 @@ export function queueDeadline(headAt, timeoutMinutes) {
 
 /** Hung removals at most cleared (hungOutcome "green") since queueRetry's `since`: past that, every hung removal counts. */
 export const QUEUE_CLEARED_MAX = 1;
+/** How many drops for a red the review stage read as GitHub's side (`outage` on a removal: an infra or not-started record) count toward no try, since `since`; any later one counts. */
+export const QUEUE_OUTAGE_MAX = 3;
 
 /**
  * What became of the steps a HUNG_CODE removal judged hung (`hung`: its record's `{job, step, number, head, by}`, `head`
@@ -2273,6 +2275,9 @@ export const CONFLICT_CODE = "merge_conflict";
  *   HUNG_CODE removal marked `cleared` (its hung step's job then concluded green in time: hungOutcome "green") is no
  *   drop: it counts as `cleared`, never toward QUEUE_TRIES or as a hold. Only the first QUEUE_CLEARED_MAX of those
  *   since `since` are cleared; any later one counts as a drop, so a step that is slow on every try still Blocks;
+ * - the queue itself for a red run the review stage read as GitHub's side (`outage`: session.mjs marks it from its
+ *   record of that drop) counts toward no try the same way, the first QUEUE_OUTAGE_MAX of them (`outages`, their count,
+ *   apart from `cleared`): an outage waits, a flake counts;
  * - a person's account (`person`: only writers can dequeue): a hold. When the newest removal is a hold, Pendulum leaves
  *   the PR out (`{hold}`) until a person enqueues it again or a new review, head, re-entry or Block moves `since`;
  * - the queue itself (`github-merge-queue`) or any other bot: a drop, with GitHub's reason code, except a removal for a
@@ -2290,6 +2295,7 @@ export function queueRetry(removals, { since, self = null }) {
   const from = Date.parse(since);
   const me = botless(self);
   let clears = 0;
+  let outages = 0;
   const after = (removals || [])
     .filter((r) => r && r.reason !== "merged" && Date.parse(r.at) > (Number.isFinite(from) ? from : -Infinity))
     .sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
@@ -2303,6 +2309,7 @@ export function queueRetry(removals, { since, self = null }) {
       }
       const drop = r.person !== true || who === QUEUE_BOT;
       const code = queueCode(r.reason);
+      if (drop && r.outage === true && outages++ < QUEUE_OUTAGE_MAX) return { at: r.at, code, drop: false, cleared: true, outage: true };
       return drop && code === CONFLICT_CODE ? { at: r.at, code, drop: false, conflict: true } : { at: r.at, code, drop };
     });
   const newest = after.at(-1);
@@ -2312,7 +2319,8 @@ export function queueRetry(removals, { since, self = null }) {
   const tried = after.filter((r) => r.drop || r.cleared);
   const n = tried.at(-1);
   const last = n ? { at: n.at, code: n.code, ...(n.pendulum ? { pendulum: true } : {}), ...(n.cleared ? { cleared: true } : {}) } : null;
-  const cleared = tried.length - drops.length ? { cleared: tried.length - drops.length } : {};
+  const outageN = tried.filter((r) => r.outage).length;
+  const cleared = { ...(tried.length - drops.length - outageN ? { cleared: tried.length - drops.length - outageN } : {}), ...(outageN ? { outages: outageN } : {}) };
   if (drops.length < QUEUE_TRIES) return { enqueue: true, drops: drops.length, last, ...cleared };
   const codes = [...new Set(drops.map((d) => d.code))];
   return { block: `the merge queue dropped the reviewed PR ${drops.length} times without merging it (${codes.join(", ")}); Pendulum re-enqueued it once. Check that the required checks run on the queue's merge_group commits`, drops: drops.length, last, codes, ...cleared };
