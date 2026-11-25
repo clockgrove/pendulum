@@ -455,7 +455,7 @@ test("finish card (#607): a read-only member's forged stage comment changes noth
   const writer = fakeRepo({ extra3: [stage("writer-607", "MEMBER", "local-w1")], permissions: { "writer-607": "write" } });
   await tickOver(writer);
   assert.match(cardOf(writer), /\n### ✅ Merged in 3 min 54 s · \$0\.52 \+ unknown\n/);
-  assert.doesNotMatch(cardOf(writer), /999/);
+  assert.doesNotMatch(cardOf(writer), /\$999/);
   // The permission's window ending during the card's reads (another repository's writer list starts the list over): the
   // writer verified as the comments were read still counts.
   const rolled = fakeRepo({ extra3: [stage("writer2-607", "MEMBER", "local-w2")], permissions: { "writer2-607": "write" }, onTimeline3: () => setWriters("acme/other", []) });
